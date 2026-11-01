@@ -2,7 +2,7 @@
 
 Browser app for the scribe team: preps tomorrow's progress notes, flags what needs attention, converts H&Ps to follow-ups, enters vitals (with a phone-camera link), reprints any past day, and prints a whole unit as one PDF with the provider circled.
 
-Live: https://feirzen.github.io/resilience-notes/
+Live: https://feirzen.github.io/Resilience-notes/ (capital R: GitHub Pages addresses match the repo name exactly)
 
 **No patient information ever goes in this repo.** Everything runs in the browser. Notes live in the team folder (U:\Scans\Tomco) that the scribe picks once in Edge. The app keeps its own data in `_app-data` inside that folder. Demo mode uses fake patients stored privately in the browser.
 

@@ -792,6 +792,7 @@ async function flagHub() {
 
 // ---------------- start ----------------
 async function boot() {
+  window.__rnStarted = true;
   applyTheme();
   const r = supported() ? await Store.restore() : {};
   if (r.store) { S.store = r.store; try { await load(); return; } catch (e) { console.warn(e); S.store = null; } }
