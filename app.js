@@ -80,17 +80,19 @@ function save(pt, { docx = true } = {}) {
     pt.updated = Date.now();
     const r = await S.store.savePatient(pt);
     if (r === "conflict") return conflict(pt);
-    if (docx) await writeDocx(pt).catch(e => console.warn("docx", e));
-  }), 400);
+    if (docx) queueDocx(pt);
+  }), 600);
 }
 function saveNow(pt, { docx = true } = {}) {
   clearTimeout(timers[pt.id]);
   return enqueue(pt, async () => {
     pt.updated = Date.now();
     const r = await S.store.savePatient(pt); if (r === "conflict") return conflict(pt);
-    if (docx) await writeDocx(pt);
+    if (docx) queueDocx(pt);
   });
 }
+// Run jobs a few at a time (network drives are faster in parallel, but not unlimited).
+async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } })); }
 function conflict(pt) {
   if (conflicts.has(pt.id)) return; conflicts.add(pt.id);
   const m = modal("Changed on another computer", `<p class="muted" style="font-size:14px">${esc(pt.name)}'s note was saved from another computer after you opened it. Load their version, or keep yours (this overwrites theirs)?</p>`,
@@ -105,6 +107,24 @@ async function docxTarget(pt) {
   if (pt.status === "admit") return { dir: S.store.root, name: `${pt.file} ADMIT.docx` };
   return { dir: unitDir, name: `${pt.file}.docx` };
 }
+// Word files are written in the background, one at a time, so the screen never waits on them.
+const docxQ = new Map(); let docxRunning = false;
+function queueDocx(pt) { docxQ.set(pt.id, pt); pill(); if (!docxRunning) runDocx(); }
+async function runDocx() {
+  docxRunning = true;
+  while (docxQ.size) {
+    const [id, pt] = docxQ.entries().next().value; docxQ.delete(id); pill();
+    try { await writeDocx(pt); } catch (e) { console.warn("Word file", pt.name, e); }
+  }
+  docxRunning = false; pill();
+}
+function pill() {
+  let el = $("#savePill");
+  const n = docxQ.size + (docxRunning ? 1 : 0);
+  if (!el && n) { el = document.createElement("div"); el.id = "savePill"; el.className = "savepill"; document.body.append(el); }
+  if (el) { if (n) el.innerHTML = `<span class="spin"></span>Saving Word files… ${n}`; else { el.innerHTML = "✓ Word files saved"; setTimeout(() => { if (!docxQ.size && !docxRunning) el.remove(); }, 1500); } }
+}
+window.addEventListener("beforeunload", e => { if (docxQ.size || docxRunning) { e.preventDefault(); e.returnValue = ""; } });
 async function writeDocx(pt) {
   if (pt.status === "discharged") return;
   const { dir, name } = await docxTarget(pt);
@@ -213,10 +233,15 @@ function welcome() {
 async function load() {
   S.pts = await S.store.loadPatients();
   S.pts.forEach(p => p.file ||= p.name);
+  for (const pt of S.pts) {                       // clean up notes imported by older versions
+    const before = pt.problems.length;
+    pt.problems = pt.problems.filter(q => !/^[-–•·\s]*\d{1,2}\/\d{1,2}\b/.test(q.name) && !/^(Patient Name|Date of Birth|MRN|Medical Record|Admit Date|Unit|Page \d|Date of service)/i.test(q.name));
+    if (pt.problems.length !== before) S.store.savePatient(pt, true);
+  }
   if (S.store.demo && !S.pts.length) {
     toast("Setting up fake patients…");
     S.pts = demoPatients(S.date);
-    for (const pt of S.pts) { await S.store.savePatient(pt, true); await writeDocx(pt); }
+    await pool(S.pts, 6, pt => S.store.savePatient(pt, true)); S.pts.forEach(queueDocx);
   }
   S.overrides = await S.store.getShared("rulebook.json", {});
   S.settings = await S.store.getShared("settings.json", { scribes: [] });
@@ -280,15 +305,16 @@ async function importNotes() {
     await add(e.h, e.name, unitOf(e.name) || null);
   }
   const found = []; let k = 0;
-  for (const s of sources) {
-    const t = $(".mb", m); if (t && sources.length > 3) t.innerHTML = `<div style="text-align:center;padding:20px"><div class="spin big"></div><p class="muted" style="margin-top:10px">Reading notes… ${++k} of ${sources.length}</p></div>`;
+  const todo = sources.filter(s => !S.pts.some(p => p.file === s.e.name.replace(/\.docx$/i, "") && active(p)));
+  await pool(todo, 6, async s => {
     const file = s.e.name.replace(/\.docx$/i, "");
-    if (S.pts.some(p => p.file === file && active(p))) continue;
     try {
       const pt = await readDocx(window.JSZip, await (await s.e.h.getFile()).arrayBuffer(), s.e.name);
       found.push({ ...s, file, pt, unit: s.unit || UNITS.find(u => u.toLowerCase() === String(pt.unit).toLowerCase()) || "" });
     } catch (err) { found.push({ ...s, file, bad: true }); }
-  }
+    const t = $(".mb", m); if (t) t.innerHTML = `<div style="text-align:center;padding:20px"><div class="spin big"></div><p class="muted" style="margin-top:10px">Reading notes… ${++k} of ${todo.length}</p></div>`;
+  });
+  found.sort((a, b) => (a.pt?.name || a.file).localeCompare(b.pt?.name || b.file));
   const legacyAdmits = (await S.store.docxIn(S.store.root)).filter(e => /ADMIT\.docx$/i.test(e.name) && !S.pts.some(p => `${p.file} ADMIT.docx` === e.name));
   const ok = found.filter(f => !f.bad);
   $(".mb", m).innerHTML = `
@@ -309,8 +335,7 @@ async function importNotes() {
     if (pick.some(f => !f.unit)) return toast("Pick a unit for every checked note");
     m.close(); const pg = progress(`Importing ${pick.length} notes`);
     let n = 0, bad = [], i = 0;
-    for (const f of pick) {
-      pg.set(`${f.pt.name || f.file} (${++i} of ${pick.length})`, i / pick.length);
+    await pool(pick, 4, async f => {
       try {
         const pt = f.pt; pt.unit = f.unit; pt.file = f.file; pt.id = (pt.id + "-" + uid()).replace(/[^a-z0-9-]/gi, "");
         const target = await S.store.unitDir(f.unit, true);
@@ -320,7 +345,8 @@ async function importNotes() {
         }
         await S.store.savePatient(pt, true); S.pts.push(pt); n++;
       } catch (err) { bad.push(f.file); console.warn(err); }
-    }
+      pg.set(`${++i} of ${pick.length}`, i / pick.length);
+    });
     pg.close(); toast(`Imported ${n}${bad.length ? `, couldn't import ${bad.length}` : ""}`); route();
   };
 }
@@ -334,7 +360,8 @@ function unitView(u) {
     && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.date)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
-      <button class="btn" id="vit">Vitals</button><button class="btn" id="prn">Print unit</button><button class="btn go" id="prep">Prep tomorrow</button></div>
+      <button class="btn" id="vit">Vitals</button><button class="btn" id="prn">Print unit</button><button class="btn go" id="prep">Prep for ${md(E.addDays(S.date, 1))}</button></div>
+    ${l.some(p => p.problems.some(q => [...q.hpi, ...q.plan].some(e => e.date > S.date))) ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Prepped notes are ready for ${md(E.addDays(S.date, 1))}.<span class="sp"></span><button class="btn sm" id="goTom">View ${md(E.addDays(S.date, 1))}</button></div>` : ""}
     <div class="row" style="margin:-4px 0 10px"><span class="sp"></span><button class="btn sm" id="reimp" title="Start this unit over from the original Word files">Start ${u} over from the original files</button></div>
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
@@ -343,6 +370,7 @@ function unitView(u) {
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
     }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>`;
   $("#reimp").onclick = e => busy(e.currentTarget, () => restartUnit(u));
+  $("#goTom")?.addEventListener("click", () => { S.date = E.addDays(S.date, 1); route(); });
   $("#vit").onclick = () => vitalsModal(u);
   $("#prn").onclick = () => printModal(unitPts(u));
   $("#prep").onclick = e => busy(e.currentTarget, () => prepUnit(u));
@@ -404,6 +432,7 @@ function ptView(id) {
       <div class="alerts">${alerts.map(f => `<div class="al ${f.level}"><span>${esc(f.text)}</span><span class="sp"></span>
         ${f.text.startsWith("Uncommon: ") ? `<button class="btn sm" data-routine="${esc(f.text.slice(10))}">Mark routine</button><button class="btn sm" data-always="${esc(f.text.slice(10))}">Always flag</button>` : ""}
         <button class="btn sm" data-addr="${esc(f.text)}">Addressed</button></div>`).join("")}</div>
+      ${lastDate(pt) > date ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Showing ${md(date)}. This note is already prepped through ${md(lastDate(pt))}.<span class="sp"></span><button class="btn sm" id="goLast">View ${md(lastDate(pt))}</button></div>` : ""}
       <div class="tools">
         <button class="btn sm" id="addP">+ Problem</button><button class="btn sm" id="vit1">Vitals</button><button class="btn sm" id="labs">Labs</button>
         <button class="btn sm" id="psy">Psych line</button><button class="btn sm" id="info">Patient info</button>
@@ -416,7 +445,7 @@ function ptView(id) {
         <div class="box">CHIEF COMPLAINT/HISTORY OF PRESENT ILLNESS:</div>
         <div class="pp click" data-edit="blurb">${esc(pt.blurb) || `<span class="muted">Add the patient history blurb…</span>`}</div>
         ${live.filter(p => !p.planOnly).map(p => `<div class="pp click" data-prob="${p.id}" id="h-${p.id}">${probPara(pt, p, "hpi", fs)}</div><div data-slot="${p.id}"></div>`).join("") ||
-          `<div class="pp">- ${md(date)}: Patient reports no medical or physical concerns today.</div>`}
+          `<ul class="dash"><li>${md(date)}: Patient reports no medical or physical concerns today.</li></ul>`}
         <div class="boxed"><div class="bl">RESOLVED HPI:</div><div class="bc">${n.resolvedHpi.map(esc).join("<br>")}</div></div>
         <div class="box">REVIEW OF SYSTEMS: <em>Systems were reviewed and normal, except as noted in the HPI.</em></div>
         <div class="box">PHYSICAL EXAMINATION:</div>
@@ -452,6 +481,7 @@ function ptView(id) {
   $("#reprint").onclick = () => reprintModal(pt);
   $("#dl").onclick = e => busy(e.currentTarget, async () => { await saveNow(pt); const { name } = await docxTarget(pt); toast(`Saved ${name} in the ${pt.status === "admit" ? "team" : pt.unit} folder`); });
   $("#dc").onclick = () => discharge(pt);
+  $("#goLast")?.addEventListener("click", () => { S.date = lastDate(pt); route(); });
   if (S.open) openEditor(pt, S.open);
 }
 async function address(pt, text) {
@@ -459,6 +489,7 @@ async function address(pt, text) {
   const p = f?.problemId && pt.problems.find(q => q.id === f.problemId);
   const med = p && p.meds.find(m => text.startsWith(m.name) && m.end);
   if (med) med.addressed = true;
+  else if (p && /course ended|last dose today/.test(text)) p.courseAddressed = true;
   else ((pt.addressed ||= {})[S.date] ||= []).push(text);
   await saveNow(pt); route();
 }
@@ -657,7 +688,7 @@ async function discharge(pt) {
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="dGo">Discharge</button>`);
   $("#dGo", m).onclick = e => busy(e.currentTarget, async () => {
     if ($("#dSeen", m).checked) await printPdf([progressBlocks(pt, S.date, { provider: S.provider })], `${pt.file}.pdf`);
-    await saveNow(pt);
+    await saveNow(pt); await queue[pt.id]; docxQ.delete(pt.id); await writeDocx(pt);
     try {
       const { dir, name } = await docxTarget(pt);
       const to = pt.status === "admit" ? await S.store.subDir(await S.store.unitDir(pt.unit, true), "admit") : await S.store.subDir(dir, "discharge");
@@ -712,8 +743,8 @@ async function prepUnit(u) {
   let quiet = 0, converted = [], i = 0;
   const pg = progress(`Prepping ${u} for ${md(tomorrow)}`);
   try {
+  const toSave = [];
   for (const pt of list) {
-    pg.set(`${pt.name} (${++i} of ${list.length})`, i / list.length);
     if (pt.status === "admit") {                       // day 2: H&P becomes the running progress note
       if (pt.admitDate > S.date) continue;
       const { dir, name } = await docxTarget(pt);
@@ -723,8 +754,9 @@ async function prepUnit(u) {
     }
     const r = E.prep(pt, S.date);
     if (r.review.length) review.push({ pt, items: r.review }); else quiet++;
-    await saveNow(pt);
+    toSave.push(pt);
   }
+  await pool(toSave, 6, async pt => { await saveNow(pt); pg.set(`Saved ${++i} of ${toSave.length}`, i / toSave.length); });
   } finally { pg.close(); }
   const m = modal(`Prep ${u} for ${md(tomorrow)}`, `
     <div class="lbl">Copied forward quietly</div><p class="muted">${quiet} patient${quiet === 1 ? "" : "s"} with no changes today.</p>
@@ -733,7 +765,9 @@ async function prepUnit(u) {
       <div class="chk"><input type="checkbox" checked><div><b>${esc(pt.name)} · ${esc(it.name)}</b> <span class="muted">(${esc(it.reasons.join(", "))})</span>
       <small>HPI ${md(tomorrow)}: ${esc(it.hpi)}</small><small>Plan ${md(tomorrow)}: ${esc(it.plan)}</small>
       <button class="btn sm" data-open="${pt.id}" style="margin-top:6px">Edit</button></div></div>`).join("")).join("")}` : `<p class="muted" style="margin-top:8px">Nothing needs review.</p>`}`,
-    `<button class="btn p" data-x>Approve all</button>`);
+    `<button class="btn" id="seeTom">Approve and view ${md(tomorrow)}</button><button class="btn p" data-x>Approve all</button>`);
+  $(".mb", m).insertAdjacentHTML("afterbegin", `<p class="muted" style="margin-bottom:6px">The notes now go through <b>${md(tomorrow)}</b>. The app opens on today's date, so tomorrow morning they show up automatically. To look at ${md(tomorrow)} now, change the date at the top or tap the button below.</p>`);
+  $("#seeTom", m).onclick = () => { S.date = tomorrow; m.close(); };
   $$("[data-open]", m).forEach(b => b.onclick = () => { m.close(); S.date = tomorrow; location.hash = "pt-" + b.dataset.open; });
   m.onclose = async () => { for (const { pt } of review) { pt.problems.forEach(p => p.needsReview = false); await S.store.savePatient(pt, true); } route(); };
 }
@@ -765,8 +799,7 @@ function printModal(list) {
   $$("[data-c]", m).forEach(c => c.onchange = upd); upd();
   $("#pGo", m).onclick = async () => {
     S.provider = $("#pP", m).value; m.close();
-    const pg = progress(`Getting ${list.length} notes ready`);
-    try { let i = 0; for (const pt of list) { pg.set(`${pt.name} (${++i} of ${list.length})`, i / list.length); await writeDocx(pt).catch(() => {}); } } finally { pg.close(); }
+    list.forEach(queueDocx);
     printPdf(list.map(pt => blocksFor(pt, S.date, { provider: S.provider })), `${list[0].unit} ${md(S.date).replace("/", "-")}.pdf`);
   };
 }

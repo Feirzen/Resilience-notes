@@ -36,38 +36,83 @@ const vitalLabel = { bp: "BP", hr: "HR", bg: "BG" };
 // What the HPI should say for this problem on this date if nothing new happened.
 // Problems imported from old Word notes (no structured meds yet) copy yesterday's
 // wording forward, like the team does by hand, swapping in today's vital numbers.
-// "start X 50 mg BID" becomes "Cont. X" the next day, and doses are dropped after the first mention.
+// "start X 50 mg BID" becomes "Cont. X" the next day and doses drop after the first mention,
+// but dates on a course (antibiotics, tapers) always stay.
 const lastEntry = (list, date) => list.filter(e => e.date < date).sort((a, b) => a.date < b.date ? -1 : 1).pop();
-const swapVitals = (patient, text, date) => text.replace(/\b(BP|HR|BG) today is [^,.;]*/g, (m, k) => {
+const swapVitals = (patient, text, date) => text.replace(/\b(BP|HR|BG) today is (?:\[\s*(?:\.\.\.|…)?\s*\]|X\b|\d+(?:\/\d+)?(?:\.\d+)?)?/g, (m, k) => {
   const v = patient.vitals?.[date]?.[k.toLowerCase()];
   return `${k} today is ${v ?? "[...]"}`;
 });
-const DOSE = /\s+\d[\d.,]*\s*(?:mg|mcg|g|units?|ml|%|puffs?)(?:\s*\/\s*(?:hr|hour))?\b(?:\s+(?:PO|IV|IM|SQ|SL|INH|topical|TD|pt\s*72\s*TD|gel))*(?:\s+(?:QD|BID|TID|QID|Q\d+H|QHS|QAM|QPM|daily|nightly|per inhalation|PRN|x\s*\d+\s*(?:more\s+)?days?|\(\s*\d+\/\d+\s*-\s*\d+\/\d+\s*\)))*/gi;
-export function forwardPlan(text) {
+const DOSE = /\s+\d[\d.,]*\s*(?:mg|mcg|g|units?|ml|%|puffs?)(?:\s*\/\s*(?:hr|hour)|\s+hr)?\b(?:\s+(?:PO|IV|IM|SQ|SL|INH|topical|TD|pt\s*72\s*TD|gel|per inhalation))*(?:\s*,?\s*(?:QD|BID|TID|QID|Q\d+H|QHS|QAM|QPM|daily|nightly|PRN)\b)*/gi;
+// "x7 days" / "x2 more days" -> "(last dose M/D)" counted from the day it was first written.
+// If the course already has dates ("(10/27-10/30)", "last dose 11/3"), just drop the "x7 days".
+const HAS_DATES = /\(\s*\d{1,2}\/\d{1,2}\s*-\s*\d{1,2}\/\d{1,2}\s*\)|last dose/i;
+function courseDays(t, from) {
+  if (HAS_DATES.test(t)) return t.replace(/\s*x\s*\d+\s*(?:more\s+)?days?\b/gi, "");
+  return t.replace(/\s*x\s*(\d+)\s*(more\s+)?days?\b/gi, (m, n, more) =>
+    from ? ` (last dose ${md(addDays(from, +n - (more ? 0 : 1)))})` : "");
+}
+// The day an "xN days" course was first written for this problem (so repeats don't push the end date).
+function courseStart(p) {
+  if (p.planOpen && /x\s*\d+\s*(?:more\s+)?days?\b/i.test(p.planOpen)) return p.start;
+  const first = [...(p.plan || []), ...(p.hpi || [])].filter(e => /x\s*\d+\s*(?:more\s+)?days?\b/i.test(e.text)).sort((a, b) => a.date < b.date ? -1 : 1)[0];
+  return first?.date || null;
+}
+const tidy = t => t.replace(/\(\s*\(/g, "(").replace(/\s{2,}/g, " ").replace(/\s+([,.)])/g, "$1").replace(/,\s*,/g, ",")
+  .replace(/(?:,\s*)?\band\s+and\b/g, " and").replace(/\(\s*\)/g, "").trim();
+export const medsInText = t => [...String(t || "").matchAll(/\b(?:with|taking|using|continue|start(?:ing)?|on)\s+([A-Z][A-Za-z-]+(?:\s+(?:HFA|XR|ER|SR|DR))?)/g)].map(m => m[1]);
+export function forwardPlan(text, from, open) {
   let t = " " + text.trim();
+  t = courseDays(t, from);
   t = t.replace(/,?\s*(?:and\s+)?will order [^,.;]*/gi, "");                  // orders happen once
+  t = t.replace(/\b(?:will\s+)?treat(?:ed)?\s+with\s+/gi, "").replace(/\bwill continue to monitor\b|\bcontinue to monitor\b/gi, "CTM");
   t = t.replace(/\bPatient\s+(?=will\b)/gi, "");
   t = t.replace(/\b(?:will\s+)?(?:start(?:ing)?|add(?:ing)?|begin|increase|decrease)\s+(?:taking\s+|using\s+)?/gi, "");
   t = t.replace(/\bfrom\s+[\d.]+\s*\w+(?:\/\w+)?\s+to\s+[\d.]+\s*\w+(?:\/\w+)?/gi, "");
+  t = t.replace(/\bnow\s+[\d.]+\s*\w+(?:\/\w+)?(?:\s+(?:QD|BID|TID|QID|Q\d+H|PRN))*/gi, "");
   t = t.replace(DOSE, "");
-  t = t.replace(/\b(?:Cont\.|Continue)\s+/gi, "").replace(/\s{2,}/g, " ").replace(/\s+([,.])/g, "$1").replace(/,\s*,/g, ",").replace(/(?:,\s*)?\band\s+and\b/g, " and").trim();
-  t = t.replace(/^[,.\s]+|[,\s]+$/g, "");
-  if (!t || /^CTM\.?$/i.test(t)) return "CTM.";
+  t = t.replace(/\b(?:Cont\.|Continue|will continue)\s+/gi, "");
+  t = tidy(t).replace(/^(?:and\s+|[,.\s]+)+|[,\s]+$/gi, "");
+  if (!t || /^CTM\.?$/i.test(t) || /^[\d\s./()mcghour-]*$/i.test(t)) {
+    if (/^\s*CTM\.?\s*$/i.test(text)) return "CTM.";
+    const names = medsInText(open); return names.length ? end("Cont. " + names.join(" and ")) : "CTM.";
+  }
   if (/^(Discontinue|CTM)/i.test(t)) return end(t);
   return end("Cont. " + t);
 }
-export function forwardHpi(text) {
+export function forwardHpi(text, from) {
   let t = text.trim();
+  t = courseDays(t, from);
   t = t.replace(/^Started on\s+/i, "Patient taking ").replace(/\bnow\s+(taking\s+)?/gi, (m, g) => g || "");
   t = t.replace(/\b(?:will\s+)?start(?:ing|ed)?\s+(?:taking\s+|using\s+)?/gi, "");
-  t = t.replace(DOSE, "").replace(/\s{2,}/g, " ").replace(/\s+([,.])/g, "$1").trim();
+  t = tidy(t.replace(DOSE, ""));
   return end(t);
+}
+// Latest course end written anywhere in a problem's plan: "(last dose 11/3)", "(10/27-10/30)", "x7 days".
+export function courseEnd(p) {
+  let best = null;
+  const mx = (a, b) => (!a || (b && b > a)) ? b : a;
+  const year = (p.start || "2026").slice(0, 4);
+  const iso = (m, d, ref) => { let y = +(ref || year).slice(0, 4); if (ref && +m < +ref.slice(5, 7) - 6) y++; return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`; };
+  const scan = (t, ref) => {
+    if (!t) return;
+    for (const m of t.matchAll(/last dose (?:on )?(\d{1,2})\/(\d{1,2})/gi)) best = mx(best, iso(m[1], m[2], ref));
+    for (const m of t.matchAll(/\(\s*\d{1,2}\/\d{1,2}\s*-\s*(\d{1,2})\/(\d{1,2})\s*\)/g)) best = mx(best, iso(m[1], m[2], ref));
+  };
+  const cs = courseStart(p);
+  if (cs) {
+    const src = p.planOpen && p.start === cs && /x\s*\d+/i.test(p.planOpen) ? p.planOpen : [...(p.plan || []), ...(p.hpi || [])].find(e => e.date === cs && /x\s*\d+/i.test(e.text))?.text || "";
+    if (!HAS_DATES.test(src)) for (const m of src.matchAll(/x\s*(\d+)\s*(more\s+)?days?\b/gi)) best = mx(best, addDays(cs, +m[1] - (m[2] ? 0 : 1)));
+  }
+  scan(p.planOpen, p.start);
+  for (const e of p.plan || []) scan(e.text, e.date);
+  return best;
 }
 
 export function defaultHpi(patient, p, date) {
   if (p.copy && !p.meds.length) {
     const last = lastEntry(p.hpi, date);
-    if (last) return end(swapVitals(patient, forwardHpi(last.text), date));
+    if (last) return end(swapVitals(patient, forwardHpi(last.text, courseStart(p) || last.date), date));
   }
   const meds = activeMeds(p, date);
   const refusing = refused(patient, p, date);
@@ -77,7 +122,8 @@ export function defaultHpi(patient, p, date) {
 
   const name = m => {
     if (m.changedOn === date) return `${m.name} now ${doseText(m)}`;
-    return mentionedBefore(p, m, date) ? m.name : medFull(m);
+    const base = mentionedBefore(p, m, date) ? m.name : medFull(m);
+    return m.end ? `${base} (last dose ${md(m.end)})` : base;
   };
   const parts = [];
   if (taking.length) {
@@ -104,7 +150,13 @@ export function defaultHpi(patient, p, date) {
 export function defaultPlan(patient, p, date) {
   if (p.copy && !p.meds.length) {
     const last = lastEntry(p.plan, date);
-    if (last) return forwardPlan(last.text.replace(/\(last dose today\)/i, ""));
+    const src = last ? last.text : p.planOpen;
+    if (src) {
+      let t = forwardPlan(src.replace(/\(last dose today\)/i, ""), courseStart(p) || last?.date || p.start, p.planOpen);
+      const ce = courseEnd(p);                                  // antibiotics always carry their date
+      if (ce && !HAS_DATES.test(t) && /^Cont\. [A-Za-z-]+(?: [A-Z]{2,4})?\.$/.test(t)) t = t.replace(/\.$/, ` (last dose ${md(ce)}).`);
+      return t;
+    }
   }
   const meds = activeMeds(p, date);
   const stopped = p.meds.filter(m => m.discontinued === date);
@@ -146,6 +198,14 @@ export function flags(patient, date, rulebook = {}) {
           text: date === m.end ? `${m.name} last dose today` : `${m.name} ended ${md(m.end)}: needs a decision` });
       }
     }
+    if (p.copy && !p.meds.length) {
+      const ce = courseEnd(p);
+      if (ce && date >= ce && !p.courseAddressed && ce >= addDays(date, -14))
+        out.push({ level: "red", problemId: p.id, text: date === ce ? `${p.name}: last dose today` : `${p.name}: course ended ${md(ce)}, needs a decision` });
+      const lp = lastEntry(p.plan, addDays(date, 1));
+      const seg = lp && lp.text.split(/[,;.]/).find(x => /\bpending\b/i.test(x));
+      if (seg) out.push({ level: "amber", problemId: p.id, text: `${seg.replace(/\s*(?:still\s+)?pending.*$/i, "").replace(/^\s*(?:and|cont\.?)\s+/i, "").trim()} pending` });
+    }
     if (p.alwaysFlag || rulebook[p.name]?.alwaysFlag) out.push({ level: "red", problemId: p.id, text: p.name });
     else if ((rulebook[p.name]?.seen ?? 0) < 3 && !rulebook[p.name]?.routine)
       out.push({ level: "amber", problemId: p.id, text: `Uncommon: ${p.name}` });
@@ -170,18 +230,24 @@ export function prep(patient, today) {
     const reasons = [];
     const tHpi = p.hpi.find(e => e.date === today);
     const tPlan = p.plan.find(e => e.date === today);
-    if (p.start === today) reasons.push("new problem today");
+    if (p.start === today && !p.copy) reasons.push("new problem today");
     if (tHpi && tHpi.text !== tHpi.auto) reasons.push("HPI edited today");
     if (tPlan && tPlan.text !== tPlan.auto) reasons.push("plan edited today");
+    if (p.copy && !p.meds.length) {
+      const key = e => e && forwardHpi(e.text).replace(/\b(BP|HR|BG) today is (?:\[[^\]]*\]|X\b|\d+(?:\/\d+)?(?:\.\d+)?)?/g, "");
+      const h = p.hpi.filter(e => e.date <= today).sort((x, y) => x.date < y.date ? -1 : 1);
+      if (h.length >= 2 && h.at(-1).date === today && key(h.at(-1)) !== key(h.at(-2))) reasons.push("wording changed today");
+      const pl = p.plan.filter(e => e.date <= today).sort((x, y) => x.date < y.date ? -1 : 1);
+      if (pl.length >= 2 && pl.at(-1).date === today && forwardPlan(pl.at(-1).text) !== forwardPlan(pl.at(-2).text)) reasons.push("plan changed today");
+      const ce = courseEnd(p); if (ce === tomorrow || ce === today) reasons.push(`course ends ${md(ce)}`);
+    }
     for (const m of p.meds) {
       if (m.start === today && !m.home) reasons.push(`new med: ${m.name}`);
       if (m.changedOn === today) reasons.push(`dose change: ${m.name}`);
       if (m.discontinued === today) reasons.push(`stopped: ${m.name}`);
       if (m.end === today) reasons.push(`${m.name} ends today`);
     }
-    const copyOnly = p.copy && !p.meds.length;
-    const skipHpi = p.planOnly || (copyOnly && !p.hpi.length);
-    const skipPlan = p.hpiOnly || (copyOnly && !p.plan.length);
+    const skipHpi = p.planOnly, skipPlan = p.hpiOnly;
     const hpi = defaultHpi(patient, p, tomorrow);
     const plan = defaultPlan(patient, p, tomorrow);
     if (!skipHpi && !p.hpi.some(e => e.date === tomorrow)) p.hpi.push({ date: tomorrow, text: hpi, auto: hpi });

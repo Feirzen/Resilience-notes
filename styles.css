@@ -175,3 +175,8 @@ h2{font-size:15px;font-weight:700;margin:18px 0 8px}
 .bar2{height:5px;border-radius:3px;background:var(--hover);margin-top:14px;overflow:hidden}
 .bar2 i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s ease-out}
 button:disabled{opacity:.7;cursor:wait}
+
+ul.dash{list-style:none;padding-left:34px;margin:6px 0}
+ul.dash li{position:relative}
+ul.dash li::before{content:"-";position:absolute;left:-20px}
+.savepill{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));background:var(--chrome);color:var(--chromeText);font-size:12.5px;font-weight:600;padding:8px 12px;border-radius:20px;z-index:40;box-shadow:0 6px 18px rgba(0,0,0,.2);animation:pop .25s ease-out}

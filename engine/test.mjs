@@ -59,10 +59,10 @@ t("no medication: baseline wording, CTM, soft flag", () => {
 t("antibiotic: full name first time, then short, last dose shown", () => {
   const pt = fake(); E.prep(pt, "2026-10-29");
   const b = pt.problems[2];
-  assert.equal(b.hpi[1].text, "Patient now taking Augmentin 875 mg PO BID, reports wound managed well with medications.");
+  assert.equal(b.hpi[1].text, "Patient now taking Augmentin 875 mg PO BID (last dose 11/1), reports wound managed well with medications.");
   assert.equal(b.plan[0].text, "Cont. Augmentin (last dose 11/1).");
   E.prep(pt, "2026-10-30");
-  assert.equal(b.hpi[2].text, "Patient taking Augmentin, reports wound managed well with medications.");
+  assert.equal(b.hpi[2].text, "Patient taking Augmentin (last dose 11/1), reports wound managed well with medications.");
 });
 
 t("antibiotic flags on last day and every day after until addressed", () => {
@@ -130,7 +130,7 @@ t("render: dated entries, psych line first, resolved moves next day", () => {
 t("reprint an old day: nothing after that date shows up", () => {
   const pt = fake(); for (const d of ["2026-10-29", "2026-10-30", "2026-10-31"]) E.prep(pt, d);
   const n = E.render(pt, "2026-10-30");
-  assert.ok(!n.hpi.join(" ").includes("11/1") && !n.hpi.join(" ").includes("10/31"));
+  assert.ok(!n.hpi.join(" ").includes("11/1:") && !n.hpi.join(" ").includes("10/31:"));
   assert.ok(n.hpi[0].includes("10/30: Patient taking Lisinopril, BP today is 136/100."));
 });
 
@@ -184,12 +184,12 @@ t("copied wording: start -> Cont., doses dropped after first mention", () => {
   assert.equal(E.forwardHpi("Patient taking Imitrex 25mg PO QD PRN, reports baseline headaches today"), "Patient taking Imitrex, reports baseline headaches today.");
 });
 
-t("imported problem with no dated plan entries doesn't get one", () => {
+t("imported problem with an undated plan copies its opening as Cont./CTM", () => {
   const pt = fake();
   pt.problems = [{ id: "v", name: "Vertigo", copy: true, start: "2026-10-01", meds: [], hpiOpen: "Patient reports dizziness", planOpen: "Continue to monitor",
     hpi: [{ date: "2026-10-30", text: "Patient reports no dizziness today", auto: "" }], plan: [] }];
   E.prep(pt, "2026-10-30");
-  assert.equal(pt.problems[0].plan.length, 0);
+  assert.equal(pt.problems[0].plan[0].text, "CTM.");
   assert.equal(pt.problems[0].hpi.length, 2);
 });
 
