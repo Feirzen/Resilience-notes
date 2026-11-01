@@ -171,4 +171,26 @@ t("med started today: plan says start with full name", () => {
   assert.equal(E.defaultPlan(pt, p, "2026-11-01"), "Cont. Omeprazole and Pepcid.");
 });
 
+t("copied wording: start -> Cont., doses dropped after first mention", () => {
+  assert.equal(E.forwardPlan("Patient will start taking Docusate 100 mg PO BID PRN"), "Cont. Docusate.");
+  assert.equal(E.forwardPlan("Cont. Mobic and Tylenol, and start Tramadol 50 mg BID PRN x2 days"), "Cont. Mobic and Tylenol, and Tramadol.");
+  assert.equal(E.forwardPlan("Cont. Mobic, increase Tylenol 975mg, will order right knee X-ray"), "Cont. Mobic, Tylenol.");
+  assert.equal(E.forwardPlan("Cont. Atrovent HFA inhaler, will add Albuterol 2 puffs Q6H PRN"), "Cont. Atrovent HFA inhaler, Albuterol.");
+  assert.equal(E.forwardPlan("Cont. Lasix (last dose 11/3) and wedge pillow, CMP and TSH pending"), "Cont. Lasix (last dose 11/3) and wedge pillow, CMP and TSH pending.");
+  assert.equal(E.forwardPlan("CTM"), "CTM.");
+  assert.equal(E.forwardPlan("Cont. Protein supplement"), "Cont. Protein supplement.");
+  assert.equal(E.forwardHpi("Patient taking Mobic and Ibuprofen and now Tramadol 50 mg BID PRN x2 days, reports baseline pain today"), "Patient taking Mobic and Ibuprofen and Tramadol, reports baseline pain today.");
+  assert.equal(E.forwardHpi("Started on Albuterol 2 puffs Q6H PRN, reports no SOB or wheezing today"), "Patient taking Albuterol, reports no SOB or wheezing today.");
+  assert.equal(E.forwardHpi("Patient taking Imitrex 25mg PO QD PRN, reports baseline headaches today"), "Patient taking Imitrex, reports baseline headaches today.");
+});
+
+t("imported problem with no dated plan entries doesn't get one", () => {
+  const pt = fake();
+  pt.problems = [{ id: "v", name: "Vertigo", copy: true, start: "2026-10-01", meds: [], hpiOpen: "Patient reports dizziness", planOpen: "Continue to monitor",
+    hpi: [{ date: "2026-10-30", text: "Patient reports no dizziness today", auto: "" }], plan: [] }];
+  E.prep(pt, "2026-10-30");
+  assert.equal(pt.problems[0].plan.length, 0);
+  assert.equal(pt.problems[0].hpi.length, 2);
+});
+
 console.log(`\n${pass} passed`);

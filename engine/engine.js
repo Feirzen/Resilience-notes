@@ -36,16 +36,38 @@ const vitalLabel = { bp: "BP", hr: "HR", bg: "BG" };
 // What the HPI should say for this problem on this date if nothing new happened.
 // Problems imported from old Word notes (no structured meds yet) copy yesterday's
 // wording forward, like the team does by hand, swapping in today's vital numbers.
+// "start X 50 mg BID" becomes "Cont. X" the next day, and doses are dropped after the first mention.
 const lastEntry = (list, date) => list.filter(e => e.date < date).sort((a, b) => a.date < b.date ? -1 : 1).pop();
 const swapVitals = (patient, text, date) => text.replace(/\b(BP|HR|BG) today is [^,.;]*/g, (m, k) => {
   const v = patient.vitals?.[date]?.[k.toLowerCase()];
   return `${k} today is ${v ?? "[...]"}`;
 });
+const DOSE = /\s+\d[\d.,]*\s*(?:mg|mcg|g|units?|ml|%|puffs?)(?:\s*\/\s*(?:hr|hour))?\b(?:\s+(?:PO|IV|IM|SQ|SL|INH|topical|TD|pt\s*72\s*TD|gel))*(?:\s+(?:QD|BID|TID|QID|Q\d+H|QHS|QAM|QPM|daily|nightly|per inhalation|PRN|x\s*\d+\s*(?:more\s+)?days?|\(\s*\d+\/\d+\s*-\s*\d+\/\d+\s*\)))*/gi;
+export function forwardPlan(text) {
+  let t = " " + text.trim();
+  t = t.replace(/,?\s*(?:and\s+)?will order [^,.;]*/gi, "");                  // orders happen once
+  t = t.replace(/\bPatient\s+(?=will\b)/gi, "");
+  t = t.replace(/\b(?:will\s+)?(?:start(?:ing)?|add(?:ing)?|begin|increase|decrease)\s+(?:taking\s+|using\s+)?/gi, "");
+  t = t.replace(/\bfrom\s+[\d.]+\s*\w+(?:\/\w+)?\s+to\s+[\d.]+\s*\w+(?:\/\w+)?/gi, "");
+  t = t.replace(DOSE, "");
+  t = t.replace(/\b(?:Cont\.|Continue)\s+/gi, "").replace(/\s{2,}/g, " ").replace(/\s+([,.])/g, "$1").replace(/,\s*,/g, ",").replace(/(?:,\s*)?\band\s+and\b/g, " and").trim();
+  t = t.replace(/^[,.\s]+|[,\s]+$/g, "");
+  if (!t || /^CTM\.?$/i.test(t)) return "CTM.";
+  if (/^(Discontinue|CTM)/i.test(t)) return end(t);
+  return end("Cont. " + t);
+}
+export function forwardHpi(text) {
+  let t = text.trim();
+  t = t.replace(/^Started on\s+/i, "Patient taking ").replace(/\bnow\s+(taking\s+)?/gi, (m, g) => g || "");
+  t = t.replace(/\b(?:will\s+)?start(?:ing|ed)?\s+(?:taking\s+|using\s+)?/gi, "");
+  t = t.replace(DOSE, "").replace(/\s{2,}/g, " ").replace(/\s+([,.])/g, "$1").trim();
+  return end(t);
+}
 
 export function defaultHpi(patient, p, date) {
   if (p.copy && !p.meds.length) {
     const last = lastEntry(p.hpi, date);
-    if (last) return end(swapVitals(patient, last.text, date));
+    if (last) return end(swapVitals(patient, forwardHpi(last.text), date));
   }
   const meds = activeMeds(p, date);
   const refusing = refused(patient, p, date);
@@ -82,7 +104,7 @@ export function defaultHpi(patient, p, date) {
 export function defaultPlan(patient, p, date) {
   if (p.copy && !p.meds.length) {
     const last = lastEntry(p.plan, date);
-    if (last) return end(last.text.replace(/\(last dose today\)/i, ""));
+    if (last) return forwardPlan(last.text.replace(/\(last dose today\)/i, ""));
   }
   const meds = activeMeds(p, date);
   const stopped = p.meds.filter(m => m.discontinued === date);
@@ -157,10 +179,13 @@ export function prep(patient, today) {
       if (m.discontinued === today) reasons.push(`stopped: ${m.name}`);
       if (m.end === today) reasons.push(`${m.name} ends today`);
     }
+    const copyOnly = p.copy && !p.meds.length;
+    const skipHpi = p.planOnly || (copyOnly && !p.hpi.length);
+    const skipPlan = p.hpiOnly || (copyOnly && !p.plan.length);
     const hpi = defaultHpi(patient, p, tomorrow);
     const plan = defaultPlan(patient, p, tomorrow);
-    if (!p.planOnly && !p.hpi.some(e => e.date === tomorrow)) p.hpi.push({ date: tomorrow, text: hpi, auto: hpi });
-    if (!p.hpiOnly && !p.plan.some(e => e.date === tomorrow)) p.plan.push({ date: tomorrow, text: plan, auto: plan });
+    if (!skipHpi && !p.hpi.some(e => e.date === tomorrow)) p.hpi.push({ date: tomorrow, text: hpi, auto: hpi });
+    if (!skipPlan && !p.plan.some(e => e.date === tomorrow)) p.plan.push({ date: tomorrow, text: plan, auto: plan });
     if (reasons.length) { p.needsReview = true; review.push({ problemId: p.id, name: p.name, reasons, hpi, plan }); }
   }
   return { tomorrow, review };
