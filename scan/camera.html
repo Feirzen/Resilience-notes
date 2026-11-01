@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Note Prep · Camera</title>
+<link rel="stylesheet" href="scan.css">
+<style>
+body{background:#0d1117;color:#e8ecf3;padding-left:0;padding-right:0}
+header{padding:0 16px}
+.dim{color:#9aa4b8}
+.cam{position:relative;margin:12px 0;background:#000;aspect-ratio:3/4;max-height:70vh;width:100%;overflow:hidden}
+video{width:100%;height:100%;object-fit:cover;display:block}
+.flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s ease-out}
+.flash.go{opacity:.8;transition:none}
+.toast{position:absolute;left:50%;bottom:16px;transform:translate(-50%,10px);background:rgba(31,157,99,.95);color:#fff;
+  padding:8px 14px;border-radius:20px;font-weight:600;font-size:14px;opacity:0;transition:all .3s ease-out}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.controls{display:flex;gap:10px;padding:0 16px}
+.controls button{flex:1;padding:16px}
+#snap{background:#fff;color:#0d1117;font-size:17px}
+.ghost{color:#e8ecf3!important;border-color:#2c3444!important}
+</style>
+</head>
+<body>
+<header>
+  <div class="row" style="justify-content:space-between">
+    <span class="status"><span class="dot" id="dot"></span><span id="statusText">Connecting…</span></span>
+    <span class="code" id="code" style="font-size:18px">····</span>
+  </div>
+  <p class="dim" style="margin-top:6px;font-size:13px">Make sure the code matches the computer. Pictures go straight to the computer and are never saved on this phone.</p>
+</header>
+<div class="cam"><video id="video" playsinline muted autoplay></video><div class="flash" id="flash"></div><div class="toast" id="toast">Sent ✓</div></div>
+<div class="controls">
+  <button class="ghost" id="done">Done</button>
+  <button id="snap" disabled>Capture</button>
+</div>
+
+<script src="../vendor/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const [targetId, code] = (location.hash.slice(1) || "").split(".");
+history.replaceState(null, "", location.pathname);   // drop the pairing info from the address bar
+let stream, conn, peer;
+
+function setStatus(text, state) { $("statusText").textContent = text; $("dot").className = "dot" + (state ? " " + state : ""); }
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 2560 } }, audio: false });
+    $("video").srcObject = stream;
+    $("snap").disabled = false;
+  } catch (e) { setStatus("Camera blocked. Allow camera access and reload.", "bad"); }
+}
+
+function stopAll() {
+  stream && stream.getTracks().forEach(t => t.stop());
+  conn && conn.close(); peer && peer.destroy();
+  $("video").srcObject = null; $("snap").disabled = true;
+  setStatus("Disconnected. You can close this tab.");
+}
+
+if (!targetId) setStatus("Scan the code on the computer to start.", "bad");
+else {
+  $("code").textContent = code;
+  peer = new Peer();
+  peer.on("open", () => {
+    conn = peer.connect(targetId, { reliable: true, metadata: { code } });
+    conn.on("open", () => { setStatus("Connected", "on"); startCamera(); });
+    conn.on("close", () => { const paired = !!stream; stopAll(); setStatus(paired ? "Computer disconnected." : "Couldn't pair. Rescan the code on the computer.", "bad"); });
+  });
+  peer.on("error", e => setStatus("Connection problem: " + e.type, "bad"));
+}
+
+$("snap").onclick = () => {
+  const v = $("video"); if (!v.videoWidth || !conn) return;
+  const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  $("flash").classList.add("go"); requestAnimationFrame(() => requestAnimationFrame(() => $("flash").classList.remove("go")));
+  c.toBlob(async blob => {
+    const buf = await blob.arrayBuffer();
+    conn.send({ type: "image", buf });
+    c.width = c.height = 0;                       // wipe the picture from memory
+    $("toast").classList.add("show"); setTimeout(() => $("toast").classList.remove("show"), 1200);
+  }, "image/jpeg", 0.85);
+};
+$("done").onclick = stopAll;
+window.addEventListener("pagehide", stopAll);
+</script>
+</body>
+</html>

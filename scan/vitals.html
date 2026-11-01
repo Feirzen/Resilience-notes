@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Note Prep · Vitals scanner (test)</title>
+<link rel="stylesheet" href="scan.css">
+<style>
+.wrap{max-width:760px;margin:0 auto}
+#qr{display:grid;place-items:center;padding:12px;background:#fff;border-radius:12px;width:max-content;margin:12px auto}
+#qr svg{width:220px;height:220px}
+.shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px}
+.shot{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--border);animation:rise .3s ease-out}
+.shot img{width:100%;display:block}
+.shot button{position:absolute;top:6px;right:6px;padding:4px 9px;font-size:12px;background:rgba(0,0,0,.6)}
+.warn{font-size:13px;color:#8a5a00;background:#fff4dc;border-radius:10px;padding:10px 12px;margin-top:12px;line-height:1.4}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Vitals scanner <span class="dim">(test version)</span></h1>
+  <p class="dim">Scan the code with your phone. Your phone shows a live camera; tap Capture and the picture comes straight here. Nothing is saved on the phone, and pictures disappear from this page when you close it.</p>
+
+  <div class="card" id="pairCard">
+    <div class="row"><span class="status"><span class="dot" id="dot"></span><span id="statusText">Starting…</span></span></div>
+    <div id="qr"></div>
+    <p class="dim" style="text-align:center">Pairing code (should match your phone):</p>
+    <p class="code" id="code" style="text-align:center">····</p>
+    <div class="row" style="justify-content:center;margin-top:10px"><button class="ghost" id="newCode">New code</button></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <b>Pictures received <span id="count" class="dim">(0)</span></b>
+      <button class="ghost" id="clearAll">Clear all</button>
+    </div>
+    <div class="shots" id="shots"></div>
+    <p class="dim" id="empty" style="margin-top:10px">Nothing yet.</p>
+  </div>
+
+  <div class="warn">Test version: use blank or fake sheets only until IT signs off. Next step is reading the numbers off each picture and matching rows to patients by room.</div>
+</div>
+
+<script src="../vendor/peerjs.min.js"></script>
+<script src="../vendor/qrcode.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const rand = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, "0")).join("");
+let peer, conn, code, count = 0;
+
+function setStatus(text, state) { $("statusText").textContent = text; $("dot").className = "dot" + (state ? " " + state : ""); }
+
+function start() {
+  if (peer) peer.destroy();
+  conn = null;
+  code = String(crypto.getRandomValues(new Uint16Array(1))[0] % 10000).padStart(4, "0");
+  const id = "noteprep-" + rand(12);
+  setStatus("Getting ready…");
+  $("code").textContent = code;
+  peer = new Peer(id);
+  peer.on("open", () => {
+    const url = new URL("camera.html", location.href);
+    url.hash = id + "." + code;
+    const qr = qrcode(0, "M"); qr.addData(url.href); qr.make();
+    $("qr").innerHTML = qr.createSvgTag({ scalable: true, margin: 2 });
+    $("qr").style.display = "grid";
+    setStatus("Waiting for your phone");
+  });
+  peer.on("connection", c => {
+    if (conn || c.metadata?.code !== code) { c.on("open", () => c.close()); return; }  // only one phone, right code
+    conn = c;
+    c.on("open", () => { setStatus("Phone connected", "on"); $("qr").style.display = "none"; });
+    c.on("data", d => { if (d && d.type === "image") addShot(d.buf); });
+    c.on("close", () => { conn = null; setStatus("Phone disconnected. Tap New code to pair again.", "bad"); });
+  });
+  peer.on("error", e => setStatus("Connection problem: " + e.type, "bad"));
+}
+
+function addShot(buf) {
+  const url = URL.createObjectURL(new Blob([buf], { type: "image/jpeg" }));
+  const div = document.createElement("div"); div.className = "shot";
+  div.innerHTML = `<img alt="Captured sheet"><button>Remove</button>`;
+  div.querySelector("img").src = url;
+  div.querySelector("button").onclick = () => { URL.revokeObjectURL(url); div.remove(); update(-1); };
+  $("shots").prepend(div); update(1);
+}
+function update(n) { count += n; $("count").textContent = `(${count})`; $("empty").style.display = count ? "none" : "block"; }
+
+$("newCode").onclick = start;
+$("clearAll").onclick = () => { $("shots").querySelectorAll("img").forEach(i => URL.revokeObjectURL(i.src)); $("shots").innerHTML = ""; count = 0; update(0); };
+window.addEventListener("beforeunload", () => peer && peer.destroy());
+start();
+</script>
+</body>
+</html>
