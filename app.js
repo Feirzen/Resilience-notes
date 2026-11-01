@@ -235,36 +235,65 @@ function home() {
 
 // ---------------- import old Word notes ----------------
 async function importNotes() {
-  const m = modal("Import notes from the folder", `<p class="muted">Looking through the unit folders…</p>`, "", true);
-  const found = [];
-  for (const u of UNITS) {
-    const dir = await S.store.unitDir(u); if (!dir) continue;
-    for (const e of await S.store.docxIn(dir)) {
-      const file = e.name.replace(/\.docx$/i, "");
-      if (S.pts.some(p => p.unit === u && p.file === file && active(p))) continue;
-      found.push({ u, e, file });
+  const m = modal("Import notes", `<p class="muted">Looking through the team folder…</p>`, "", true);
+  // Look everywhere a note might have been dropped: unit folders, the top folder,
+  // other top-level folders (like an unzipped download), even _app-data/patients.
+  const sources = [], zips = [];
+  const unitOf = name => UNITS.find(u => name.toLowerCase().includes(u.toLowerCase()));
+  const add = async (dir, where, unit) => {
+    for (const e of await S.store.entries(dir)) {
+      if (e.h.kind !== "file") continue;
+      if (/\.zip$/i.test(e.name)) zips.push(where + "/" + e.name);
+      if (/\.docx$/i.test(e.name) && !e.name.startsWith("~$") && !/ADMIT\.docx$/i.test(e.name)) sources.push({ dir, e, where, unit });
     }
+  };
+  await add(S.store.root, "Top folder", null);
+  for (const e of await S.store.entries(S.store.root)) {
+    if (e.h.kind !== "directory" || /template/i.test(e.name)) continue;
+    if (e.name === "_app-data") { const pd = await S.store.dir(e.h, "patients"); if (pd) await add(pd, "_app-data/patients", null); continue; }
+    await add(e.h, e.name, unitOf(e.name) || null);
+  }
+  const found = [];
+  for (const s of sources) {
+    const file = s.e.name.replace(/\.docx$/i, "");
+    if (S.pts.some(p => p.file === file && active(p))) continue;
+    try {
+      const pt = await readDocx(window.JSZip, await (await s.e.h.getFile()).arrayBuffer(), s.e.name);
+      found.push({ ...s, file, pt, unit: s.unit || UNITS.find(u => u.toLowerCase() === String(pt.unit).toLowerCase()) || "" });
+    } catch (err) { found.push({ ...s, file, bad: true }); }
   }
   const legacyAdmits = (await S.store.docxIn(S.store.root)).filter(e => /ADMIT\.docx$/i.test(e.name) && !S.pts.some(p => `${p.file} ADMIT.docx` === e.name));
-  $(".mb", m).innerHTML = found.length ? `<p class="muted">These notes aren't in the app yet. Imported problems keep copying their wording forward until you add their meds in the app. The original file is backed up the first time the app rewrites it.</p>
-    <div style="margin-top:8px">${found.map((f, i) => `<label class="chk"><input type="checkbox" checked data-i="${i}"><div>${esc(f.file)}<small>${f.u}</small></div></label>`).join("")}</div>
-    ${legacyAdmits.length ? `<p class="warnbox">${legacyAdmits.length} hand-made H&amp;P file(s) at the top of the folder can't be imported yet. Finish those the usual way, or re-enter them with + New H&amp;P.</p>` : ""}`
-    : `<p class="muted">Every note in the unit folders is already in the app.</p>`;
-  if (!found.length) return;
+  const ok = found.filter(f => !f.bad);
+  $(".mb", m).innerHTML = `
+    ${zips.length ? `<p class="warnbox">Found ${zips.length} .zip file(s). Downloads from SharePoint come zipped: right-click the zip, choose <b>Extract All</b>, then try again.</p>` : ""}
+    ${ok.length ? `<p class="muted">Notes not in the app yet. Check each one's unit (read from the note's header). After import, each Word file is moved into its unit folder, and the original is backed up the first time the app rewrites it.</p>
+    <div style="margin-top:8px">${found.map((f, i) => f.bad ? `<div class="chk"><input type="checkbox" disabled><div>${esc(f.file)}<small>Couldn't read this file (${esc(f.where)})</small></div></div>` :
+      `<div class="chk"><input type="checkbox" checked data-i="${i}"><div style="flex:1">${esc(f.pt.name || f.file)}<small>${f.pt.problems.length} problems · found in ${esc(f.where)}</small></div>
+      <select data-u="${i}" class="btn sm">${["", ...UNITS].map(u => `<option ${u === f.unit ? "selected" : ""} value="${u}">${u || "Pick unit"}</option>`).join("")}</select></div>`).join("")}</div>`
+    : `<p class="muted">No new notes found. Put each unit's Word notes inside that unit's folder (or anywhere in the team folder), then tap Import again.</p>`}
+    ${legacyAdmits.length ? `<p class="warnbox">${legacyAdmits.length} hand-made H&amp;P file(s) at the top can't be imported yet. Finish those the usual way, or re-enter them with + New H&amp;P.</p>` : ""}`;
+  if (!ok.length) return;
   const foot = document.createElement("div"); foot.className = "mfoot";
-  foot.innerHTML = `<button class="btn" data-x>Cancel</button><button class="btn p" id="doImp">Import ${found.length}</button>`;
+  foot.innerHTML = `<button class="btn" data-x>Cancel</button><button class="btn p" id="doImp">Import</button>`;
   $(".modal", m).append(foot);
   $("#doImp").onclick = async () => {
     const pick = $$("[data-i]", m).filter(c => c.checked).map(c => found[+c.dataset.i]);
-    let ok = 0, bad = [];
+    for (const f of pick) f.unit = $(`[data-u="${found.indexOf(f)}"]`, m).value;
+    if (pick.some(f => !f.unit)) return toast("Pick a unit for every checked note");
+    $("#doImp").disabled = true; $("#doImp").textContent = "Importing…";
+    let n = 0, bad = [];
     for (const f of pick) {
       try {
-        const pt = await readDocx(window.JSZip, await (await f.e.h.getFile()).arrayBuffer(), f.e.name);
-        pt.unit = f.u; pt.file = f.file; pt.id = (pt.id + "-" + uid()).replace(/[^a-z0-9-]/gi, "");
-        await S.store.savePatient(pt, true); S.pts.push(pt); ok++;
+        const pt = f.pt; pt.unit = f.unit; pt.file = f.file; pt.id = (pt.id + "-" + uid()).replace(/[^a-z0-9-]/gi, "");
+        const target = await S.store.unitDir(f.unit, true);
+        if (!(await target.isSameEntry(f.dir))) {
+          if (await S.store.exists(target, f.e.name)) await f.dir.removeEntry(f.e.name);   // a copy is already in the unit folder
+          else await S.store.move(f.dir, f.e.name, target);
+        }
+        await S.store.savePatient(pt, true); S.pts.push(pt); n++;
       } catch (err) { bad.push(f.file); console.warn(err); }
     }
-    m.close(); toast(`Imported ${ok}${bad.length ? `, couldn't read ${bad.length}` : ""}`); route();
+    m.close(); toast(`Imported ${n}${bad.length ? `, couldn't import ${bad.length}` : ""}`); route();
   };
 }
 
