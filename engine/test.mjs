@@ -144,7 +144,7 @@ t("times: 0930-1500 and all different", () => {
 t("H&P converts to progress note and drops ADMIT from the name", () => {
   const a = { ...fake(), type: "admit", file: "Doe, Jane ADMIT" };
   const p = E.convertAdmit(a);
-  assert.equal(p.file, "Doe, Jane"); assert.equal(p.type, "progress");
+  assert.equal(p.file, "Doe, Jane"); assert.equal(p.status, "active");
 });
 
 t("rulebook flags uncommon diagnoses until seen a few times", () => {
@@ -152,6 +152,23 @@ t("rulebook flags uncommon diagnoses until seen a few times", () => {
   assert.ok(E.flags(pt, "2026-10-30", rb).some(f => f.text === "Uncommon: Hypertension"));
   E.learn(rb, [pt, pt, pt]);
   assert.ok(!E.flags(pt, "2026-10-30", rb).some(f => f.text === "Uncommon: Hypertension"));
+});
+
+t("imported problem copies yesterday's wording with today's BP", () => {
+  const pt = fake();
+  pt.problems = [{ id: "x", name: "Hypertension", copy: true, start: "2026-10-01", meds: [],
+    hpi: [{ date: "2026-10-30", text: "Patient taking Lisinopril, BP today is 136/100", auto: "" }],
+    plan: [{ date: "2026-10-30", text: "Cont. Lisinopril", auto: "" }] }];
+  E.prep(pt, "2026-10-30");
+  assert.equal(pt.problems[0].hpi[1].text, "Patient taking Lisinopril, BP today is 150/74.");
+  assert.equal(pt.problems[0].plan[1].text, "Cont. Lisinopril.");
+});
+
+t("med started today: plan says start with full name", () => {
+  const pt = fake(); const p = pt.problems[1];
+  p.meds.push({ id: "t1", name: "Pepcid", dose: "20mg", route: "PO", freq: "BID", start: "2026-10-31" });
+  assert.equal(E.defaultPlan(pt, p, "2026-10-31"), "Cont. Omeprazole and start Pepcid 20mg PO BID.");
+  assert.equal(E.defaultPlan(pt, p, "2026-11-01"), "Cont. Omeprazole and Pepcid.");
 });
 
 console.log(`\n${pass} passed`);

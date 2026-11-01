@@ -1,13 +1,17 @@
 # Resilience Notes
 
-A browser app that preps scribe progress notes for the next day: rolls each problem forward, flags what needs attention, rebuilds any past day for reprints, and (soon) builds the Word docs.
+Browser app for the scribe team: preps tomorrow's progress notes, flags what needs attention, converts H&Ps to follow-ups, enters vitals (with a phone-camera link), reprints any past day, and prints a whole unit as one PDF with the provider circled.
 
-**No patient information ever goes in this repo.** The app runs entirely in the browser. Patient files stay on the work computer (and later, the hospital's SharePoint). Test with fake patients only.
+Live: https://feirzen.github.io/resilience-notes/
 
-## What's here
-- `engine/engine.js`: the rules (wording, prep, flags, reprint, times). Run the tests with `node engine/test.mjs`.
-- `scan/vitals.html` + `scan/camera.html`: phone camera to computer, peer-to-peer. The phone shows a live camera, sends each picture straight to the computer, and saves nothing. Only the connection handshake uses a signaling service (currently the free PeerJS server; it never sees pictures).
-- `vendor/`: PeerJS and a QR code library, kept here so nothing loads from outside sites.
+**No patient information ever goes in this repo.** Everything runs in the browser. Notes live in the team folder (U:\Scans\Tomco) that the scribe picks once in Edge. The app keeps its own data in `_app-data` inside that folder. Demo mode uses fake patients stored privately in the browser.
 
-## Coming next
-UI (after the concept pick), Word doc output from the templates, reading the vitals sheet, census Excel, H&P form.
+## Layout
+- `app.js`, `styles.css`, `index.html`: the screens (home dashboard, unit list, paper-style note editor, vitals, prep review, print check, H&P form, flag list).
+- `engine/`: the rules (wording, prep, flags, reprint, times). `node engine/test.mjs`
+- `lib/layout.js`: note -> template blocks. `docx-out.js` (Word), `pdf-out.js` (print), `docx-in.js` (import hand-made notes), `store.js` (folder), `pair.js` (phone camera), `demo.js` (fake patients). `node lib/test.mjs` (needs docx, jszip, jspdf from npm)
+- `scan/camera.html`: the phone side of the camera link. Pictures go peer-to-peer and are never saved.
+- `vendor/`: libraries kept local so nothing loads from outside sites.
+
+## Flags
+This project's flags are saved in the team folder (`_app-data/feedback.json`), not in any other flag system. Use the Flag list's "Copy open flags for Claude" button to work through them. Never put patient info in a flag.

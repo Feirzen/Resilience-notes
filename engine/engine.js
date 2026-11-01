@@ -34,7 +34,19 @@ const vitalLabel = { bp: "BP", hr: "HR", bg: "BG" };
 
 // ---------- default wording ----------
 // What the HPI should say for this problem on this date if nothing new happened.
+// Problems imported from old Word notes (no structured meds yet) copy yesterday's
+// wording forward, like the team does by hand, swapping in today's vital numbers.
+const lastEntry = (list, date) => list.filter(e => e.date < date).sort((a, b) => a.date < b.date ? -1 : 1).pop();
+const swapVitals = (patient, text, date) => text.replace(/\b(BP|HR|BG) today is [^,.;]*/g, (m, k) => {
+  const v = patient.vitals?.[date]?.[k.toLowerCase()];
+  return `${k} today is ${v ?? "[...]"}`;
+});
+
 export function defaultHpi(patient, p, date) {
+  if (p.copy && !p.meds.length) {
+    const last = lastEntry(p.hpi, date);
+    if (last) return end(swapVitals(patient, last.text, date));
+  }
   const meds = activeMeds(p, date);
   const refusing = refused(patient, p, date);
   const taking = meds.filter(m => !refusing.includes(m));
@@ -47,8 +59,12 @@ export function defaultHpi(patient, p, date) {
   };
   const parts = [];
   if (taking.length) {
-    const startedYesterday = taking.some(m => m.start === addDays(date, -1) && !m.home);
-    parts.push(`Patient ${startedYesterday ? "now taking" : "taking"} ${join(taking.map(name))}`);
+    const fresh = taking.filter(m => m.start === addDays(date, -1) && !m.home);
+    const old = taking.filter(m => !fresh.includes(m));
+    const bits = [];
+    if (old.length) bits.push(`taking ${join(old.map(name))}`);
+    if (fresh.length) bits.push(`now taking ${join(fresh.map(name))}`);
+    parts.push(`Patient ${bits.join(" and ")}`);
   }
   if (stoppedToday.length) parts.push(`no longer taking ${join(stoppedToday.map(m => m.name))}`);
   if (refusing.length) parts.push(`${parts.length ? "" : "Patient "}refusing ${join(refusing.map(m => m.name))}`.trim());
@@ -64,6 +80,10 @@ export function defaultHpi(patient, p, date) {
 
 // What the plan should say for this problem on this date.
 export function defaultPlan(patient, p, date) {
+  if (p.copy && !p.meds.length) {
+    const last = lastEntry(p.plan, date);
+    if (last) return end(last.text.replace(/\(last dose today\)/i, ""));
+  }
   const meds = activeMeds(p, date);
   const stopped = p.meds.filter(m => m.discontinued === date);
   if (!meds.length && !stopped.length) return "CTM.";
@@ -72,12 +92,24 @@ export function defaultPlan(patient, p, date) {
     if (m.end) s += ` (last dose ${md(m.end)})`;
     return s;
   };
+  const starts = meds.filter(m => m.start === date && !m.home);
+  const cont = meds.filter(m => !starts.includes(m));
+  const startTxt = starts.map(m => medFull(m) + (m.end ? ` (last dose ${md(m.end)})` : ""));
   if (stopped.length) {
-    const rest = meds.length ? ` and continue ${join(meds.map(label))}` : "";
-    return end(`Discontinue ${join(stopped.map(m => m.name))}${rest}`);
+    const rest = cont.length ? ` and continue ${join(cont.map(label))}` : "";
+    const st = starts.length ? ` and start ${join(startTxt)}` : "";
+    return end(`Discontinue ${join(stopped.map(m => m.name))}${rest}${st}`);
   }
-  return end(`Cont. ${join(meds.map(label))}`);
+  const bits = [];
+  if (cont.length) bits.push(`Cont. ${join(cont.map(label))}`);
+  if (starts.length) bits.push(`${cont.length ? "start" : "Start"} ${join(startTxt)}`);
+  return end(bits.join(" and "));
 }
+
+export const planOpening = p => {
+  const ms = p.meds.filter(m => m.start <= p.start);
+  return ms.length ? `Will treat with ${join(ms.map(m => medFull(m) + (m.end ? ` (last dose ${md(m.end)})` : "")))}` : "Will continue to monitor";
+};
 
 // ---------- flags ----------
 // Each flag: { level: "red" | "amber" | "blue" | "soft", text, problemId? }
@@ -95,7 +127,7 @@ export function flags(patient, date, rulebook = {}) {
     if (p.alwaysFlag || rulebook[p.name]?.alwaysFlag) out.push({ level: "red", problemId: p.id, text: p.name });
     else if ((rulebook[p.name]?.seen ?? 0) < 3 && !rulebook[p.name]?.routine)
       out.push({ level: "amber", problemId: p.id, text: `Uncommon: ${p.name}` });
-    if (!activeMeds(p, date).length) out.push({ level: "soft", problemId: p.id, text: `${p.name}: no medication` });
+    if (!activeMeds(p, date).length && !p.copy) out.push({ level: "soft", problemId: p.id, text: `${p.name}: no medication` });
     if (p.peLine) out.push({ level: "soft", problemId: p.id, text: `Exam changed by ${p.name}` });
   }
   const refusingNames = patient.problems.flatMap(p => refused(patient, p, date)).map(m => m.name);
@@ -202,6 +234,8 @@ export function assignTimes(patients, date, seed = date) {
 export function convertAdmit(admit) {
   const pt = structuredClone(admit);
   pt.type = "progress";
+  pt.status = "active";
+  pt.converted = pt.admitDate;
   pt.file = (pt.file || pt.name).replace(/\s*ADMIT\s*$/, "");
   return pt;
 }
