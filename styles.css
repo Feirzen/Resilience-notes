@@ -168,3 +168,10 @@ h2{font-size:15px;font-weight:700;margin:18px 0 8px}
 .warnbox{font-size:12.5px;color:var(--ambInk);background:var(--ambBg);border-radius:10px;padding:10px 12px;line-height:1.45;margin-top:12px}
 
 @media(max-width:480px){.brand{display:none}.datebox{max-width:140px}}
+
+.spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;margin-right:7px;vertical-align:-2px;animation:rot .7s linear infinite}
+.spin.big{width:34px;height:34px;border-width:3px;margin:0;color:var(--accent)}
+@keyframes rot{to{transform:rotate(360deg)}}
+.bar2{height:5px;border-radius:3px;background:var(--hover);margin-top:14px;overflow:hidden}
+.bar2 i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s ease-out}
+button:disabled{opacity:.7;cursor:wait}

@@ -159,8 +159,8 @@ export function prep(patient, today) {
     }
     const hpi = defaultHpi(patient, p, tomorrow);
     const plan = defaultPlan(patient, p, tomorrow);
-    if (!p.hpi.some(e => e.date === tomorrow)) p.hpi.push({ date: tomorrow, text: hpi, auto: hpi });
-    if (!p.plan.some(e => e.date === tomorrow)) p.plan.push({ date: tomorrow, text: plan, auto: plan });
+    if (!p.planOnly && !p.hpi.some(e => e.date === tomorrow)) p.hpi.push({ date: tomorrow, text: hpi, auto: hpi });
+    if (!p.hpiOnly && !p.plan.some(e => e.date === tomorrow)) p.plan.push({ date: tomorrow, text: plan, auto: plan });
     if (reasons.length) { p.needsReview = true; review.push({ problemId: p.id, name: p.name, reasons, hpi, plan }); }
   }
   return { tomorrow, review };
@@ -202,13 +202,13 @@ export function render(patient, asOf) {
     : null;
   return {
     blurb: patient.blurb || "",
-    hpi: active.map(p => para(p, p.hpiOpen, p.hpi, asOf)),
-    resolvedHpi: done.map(p => para(p, p.hpiOpen, p.hpi, asOf) + " RESOLVED."),
+    hpi: active.filter(p => !p.planOnly).map(p => para(p, p.hpiOpen, p.hpi, asOf)),
+    resolvedHpi: done.filter(p => !p.planOnly).map(p => para(p, p.hpiOpen, p.hpi, asOf) + " RESOLVED."),
     vitals: patient.vitals?.[asOf] || {},
     labs: (patient.labs || []).filter(l => l.date <= asOf),
     standing: ["Diet is regular.", "Activity is as tolerated."],
-    plan: [psychLine, ...active.map(p => para(p, p.planOpen, p.plan, asOf))].filter(Boolean),
-    resolvedPlan: done.map(p => para(p, p.planOpen, p.plan, asOf) + " RESOLVED."),
+    plan: [psychLine, ...active.filter(p => !p.hpiOnly).map(p => para(p, p.planOpen, p.plan, asOf))].filter(Boolean),
+    resolvedPlan: done.filter(p => !p.hpiOnly).map(p => para(p, p.planOpen, p.plan, asOf) + " RESOLVED."),
     pcp: patient.problems.filter(p => p.pcp && p.start <= asOf).map(p => p.name),
     pe: active.filter(p => p.peLine).map(p => p.peLine),
     dateOfService: md(asOf) + "/" + asOf.slice(0, 4),

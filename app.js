@@ -33,6 +33,25 @@ function modal(title, body, foot = "", wide = false) {
   s.addEventListener("click", e => { if (e.target === s || e.target.closest("[data-x]")) close(); });
   document.body.append(s); s.close = close; return s;
 }
+// Busy feedback: the button shows a spinner and can't be pressed twice.
+async function busy(btn, fn) {
+  if (!btn || btn.dataset.busy) return;
+  btn.dataset.busy = "1"; const html = btn.innerHTML; btn.disabled = true;
+  btn.innerHTML = `<span class="spin"></span>${html}`;
+  try { return await fn(); }
+  catch (e) { console.error(e); showError(e); }
+  finally { if (btn.isConnected) { btn.innerHTML = html; btn.disabled = false; delete btn.dataset.busy; } }
+}
+// Full-screen progress for longer jobs (prep, import, print).
+function progress(title) {
+  const s = document.createElement("div"); s.className = "scrim";
+  s.innerHTML = `<div class="modal" style="max-width:380px"><div class="mb" style="text-align:center;padding:26px 20px"><div class="spin big"></div><div style="font-weight:600;margin-top:14px">${title}</div><div class="muted" id="pgT" style="margin-top:6px">&nbsp;</div><div class="bar2"><i id="pgB"></i></div></div></div>`;
+  document.body.append(s);
+  return { set(text, frac) { $("#pgT", s).textContent = text; if (frac != null) $("#pgB", s).style.width = Math.round(frac * 100) + "%"; }, close() { s.remove(); } };
+}
+function showError(e) {
+  modal("Something went wrong", `<p class="muted" style="font-size:14px">${esc(e?.message || e)}</p><p class="muted" style="margin-top:8px">Nothing was lost. Try again; if it keeps happening, raise a flag with what you clicked.</p>`, `<button class="btn p" data-x>OK</button>`);
+}
 const ask = (title, text, yes = "OK") => new Promise(res => {
   const m = modal(title, `<p class="muted" style="font-size:14px">${text}</p>`, `<button class="btn" data-x>Cancel</button><button class="btn p" data-yes>${yes}</button>`);
   m.onclose = () => res(false); $("[data-yes]", m).onclick = () => { m.onclose = null; m.remove(); res(true); };
@@ -52,26 +71,33 @@ const loud = fs => fs.filter(f => f.level === "red" || f.level === "amber");
 const editedToday = (pt, p) => [...p.hpi, ...p.plan].some(e => e.date === S.date && e.text !== e.auto);
 
 // ---------------- saving ----------------
-const timers = {};
+const timers = {}, queue = {}, conflicts = new Set();
+// One save at a time per patient, so quick clicks never step on each other.
+const enqueue = (pt, job) => (queue[pt.id] = (queue[pt.id] || Promise.resolve()).then(job).catch(e => { console.error(e); }));
 function save(pt, { docx = true } = {}) {
   clearTimeout(timers[pt.id]);
-  timers[pt.id] = setTimeout(async () => {
+  timers[pt.id] = setTimeout(() => enqueue(pt, async () => {
     pt.updated = Date.now();
     const r = await S.store.savePatient(pt);
     if (r === "conflict") return conflict(pt);
-    if (docx) writeDocx(pt).catch(e => console.warn("docx", e));
-  }, 350);
+    if (docx) await writeDocx(pt).catch(e => console.warn("docx", e));
+  }), 400);
 }
-async function saveNow(pt) {
-  clearTimeout(timers[pt.id]); pt.updated = Date.now();
-  const r = await S.store.savePatient(pt); if (r === "conflict") return conflict(pt);
-  await writeDocx(pt);
+function saveNow(pt, { docx = true } = {}) {
+  clearTimeout(timers[pt.id]);
+  return enqueue(pt, async () => {
+    pt.updated = Date.now();
+    const r = await S.store.savePatient(pt); if (r === "conflict") return conflict(pt);
+    if (docx) await writeDocx(pt);
+  });
 }
 function conflict(pt) {
+  if (conflicts.has(pt.id)) return; conflicts.add(pt.id);
   const m = modal("Changed on another computer", `<p class="muted" style="font-size:14px">${esc(pt.name)}'s note was saved from another computer after you opened it. Load their version, or keep yours (this overwrites theirs)?</p>`,
     `<button class="btn" data-load>Load theirs</button><button class="btn p" data-keep>Keep mine</button>`);
-  $("[data-load]", m).onclick = async () => { const fresh = await S.store.reloadPatient(pt.id); Object.assign(pt, fresh); m.close(); route(); };
-  $("[data-keep]", m).onclick = async () => { await S.store.savePatient(pt, true); await writeDocx(pt); m.close(); toast("Saved"); };
+  m.onclose = () => conflicts.delete(pt.id);
+  $("[data-load]", m).onclick = e => busy(e.currentTarget, async () => { const fresh = await S.store.reloadPatient(pt.id); for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, fresh); m.close(); route(); toast("Loaded the latest version"); });
+  $("[data-keep]", m).onclick = e => busy(e.currentTarget, async () => { await S.store.savePatient(pt, true); await writeDocx(pt); m.close(); toast("Saved your version"); });
 }
 const lastDate = pt => pt.problems.flatMap(p => [...p.hpi, ...p.plan]).reduce((a, e) => e.date > a ? e.date : a, S.date);
 async function docxTarget(pt) {
@@ -230,7 +256,7 @@ function home() {
     }).join("")}</div>
     ${waiting.length ? `<h2>New admits (H&amp;P)</h2><div class="card list">${waiting.map(p => `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}<span class="tag">ADMIT</span></span><span class="mk q">${p.unit} · admitted ${md(p.admitDate)}</span></a>`).join("")}</div>` : ""}
     ${S.store.demo ? `<p class="warnbox">Demo mode: every patient here is fake, and nothing touches the U: drive.</p>` : ""}`;
-  $("#imp").onclick = importNotes;
+  $("#imp").onclick = e => busy(e.currentTarget, importNotes);
 }
 
 // ---------------- import old Word notes ----------------
@@ -253,8 +279,9 @@ async function importNotes() {
     if (e.name === "_app-data") { const pd = await S.store.dir(e.h, "patients"); if (pd) await add(pd, "_app-data/patients", null); continue; }
     await add(e.h, e.name, unitOf(e.name) || null);
   }
-  const found = [];
+  const found = []; let k = 0;
   for (const s of sources) {
+    const t = $(".mb", m); if (t && sources.length > 3) t.innerHTML = `<div style="text-align:center;padding:20px"><div class="spin big"></div><p class="muted" style="margin-top:10px">Reading notes… ${++k} of ${sources.length}</p></div>`;
     const file = s.e.name.replace(/\.docx$/i, "");
     if (S.pts.some(p => p.file === file && active(p))) continue;
     try {
@@ -280,9 +307,10 @@ async function importNotes() {
     const pick = $$("[data-i]", m).filter(c => c.checked).map(c => found[+c.dataset.i]);
     for (const f of pick) f.unit = $(`[data-u="${found.indexOf(f)}"]`, m).value;
     if (pick.some(f => !f.unit)) return toast("Pick a unit for every checked note");
-    $("#doImp").disabled = true; $("#doImp").textContent = "Importing…";
-    let n = 0, bad = [];
+    m.close(); const pg = progress(`Importing ${pick.length} notes`);
+    let n = 0, bad = [], i = 0;
     for (const f of pick) {
+      pg.set(`${f.pt.name || f.file} (${++i} of ${pick.length})`, i / pick.length);
       try {
         const pt = f.pt; pt.unit = f.unit; pt.file = f.file; pt.id = (pt.id + "-" + uid()).replace(/[^a-z0-9-]/gi, "");
         const target = await S.store.unitDir(f.unit, true);
@@ -293,7 +321,7 @@ async function importNotes() {
         await S.store.savePatient(pt, true); S.pts.push(pt); n++;
       } catch (err) { bad.push(f.file); console.warn(err); }
     }
-    m.close(); toast(`Imported ${n}${bad.length ? `, couldn't import ${bad.length}` : ""}`); route();
+    pg.close(); toast(`Imported ${n}${bad.length ? `, couldn't import ${bad.length}` : ""}`); route();
   };
 }
 
@@ -301,20 +329,49 @@ async function importNotes() {
 function unitView(u) {
   if (!UNITS.includes(u)) return home();
   const l = unitPts(u), y = E.addDays(S.date, -1);
-  const behind = l.filter(p => p.status !== "admit" && p.problems.some(q => !(q.resolved && q.resolved < S.date) && q.start < S.date && !q.hpi.some(e => e.date === S.date)));
+  const has = (q, d) => (q.planOnly ? q.plan : q.hpi).some(e => e.date === d);
+  const behind = l.filter(p => p.status !== "admit" && p.problems.some(q => !(q.resolved && q.resolved < S.date) && q.start < S.date
+    && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.date)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
       <button class="btn" id="vit">Vitals</button><button class="btn" id="prn">Print unit</button><button class="btn go" id="prep">Prep tomorrow</button></div>
+    <div class="row" style="margin:-4px 0 10px"><span class="sp"></span><button class="btn sm" id="reimp" title="Start this unit over from the original Word files">Start ${u} over from the original files</button></div>
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
       const fs = loud(flagsFor(p)); const top = fs.find(f => f.level === "red") || fs[0];
       return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}</span>
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
     }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>`;
+  $("#reimp").onclick = e => busy(e.currentTarget, () => restartUnit(u));
   $("#vit").onclick = () => vitalsModal(u);
   $("#prn").onclick = () => printModal(unitPts(u));
-  $("#prep").onclick = () => prepUnit(u);
-  $("#catch")?.addEventListener("click", async () => { for (const p of behind) { E.prep(p, y); await saveNow(p); } toast("Caught up"); route(); });
+  $("#prep").onclick = e => busy(e.currentTarget, () => prepUnit(u));
+  $("#catch")?.addEventListener("click", e => busy(e.currentTarget, async () => {
+    const pg = progress(`Prepping ${u} for ${md(S.date)}`);
+    try { let i = 0; for (const p of behind) { pg.set(`${p.name} (${++i} of ${behind.length})`, i / behind.length); E.prep(p, y); await saveNow(p); } }
+    finally { pg.close(); }
+    toast("Caught up"); route();
+  }));
+}
+
+// Undo the app's changes for one unit: put the original Word files back, forget the app's copies, import again.
+async function restartUnit(u) {
+  if (!(await ask(`Start ${u} over?`, `This puts back the original Word files the app backed up for ${u}, forgets the app's version of those notes, and opens Import so you can bring them in fresh. Edits made in the app for ${u} are lost.`, "Start over"))) return;
+  const pg = progress(`Resetting ${u}`);
+  try {
+    const unitDir = await S.store.unitDir(u, true);
+    const orig = await S.store.dir(await S.store.data(), "originals", true);
+    for (const e of await S.store.entries(orig)) {
+      if (e.h.kind === "file" && e.name.startsWith(u + " - ")) {
+        await S.store.write(unitDir, e.name.slice(u.length + 3), await (await e.h.getFile()).arrayBuffer());
+        await orig.removeEntry(e.name);
+      }
+    }
+    const pdir = await S.store.patientsDir();
+    for (const pt of S.pts.filter(p => p.unit === u && active(p))) { try { await pdir.removeEntry(pt.id + ".json"); } catch {} }
+    S.pts = S.pts.filter(p => !(p.unit === u && active(p)));
+  } finally { pg.close(); }
+  route(); await importNotes();
 }
 
 // ---------------- patient view ----------------
@@ -358,8 +415,8 @@ function ptView(id) {
         <div class="ttl">${pt.status === "admit" ? "HISTORY AND PHYSICAL EXAMINATION" : "MEDICAL PROGRESS NOTE:"}</div>
         <div class="box">CHIEF COMPLAINT/HISTORY OF PRESENT ILLNESS:</div>
         <div class="pp click" data-edit="blurb">${esc(pt.blurb) || `<span class="muted">Add the patient history blurb…</span>`}</div>
-        ${live.map(p => `<div class="pp click" data-prob="${p.id}" id="h-${p.id}">${probPara(pt, p, "hpi", fs)}</div><div data-slot="${p.id}"></div>`).join("") ||
-          `<div class="pp">- ${md(date)}: Patient denies any physical or medical concerns today.</div>`}
+        ${live.filter(p => !p.planOnly).map(p => `<div class="pp click" data-prob="${p.id}" id="h-${p.id}">${probPara(pt, p, "hpi", fs)}</div><div data-slot="${p.id}"></div>`).join("") ||
+          `<div class="pp">- ${md(date)}: Patient reports no medical or physical concerns today.</div>`}
         <div class="boxed"><div class="bl">RESOLVED HPI:</div><div class="bc">${n.resolvedHpi.map(esc).join("<br>")}</div></div>
         <div class="box">REVIEW OF SYSTEMS: <em>Systems were reviewed and normal, except as noted in the HPI.</em></div>
         <div class="box">PHYSICAL EXAMINATION:</div>
@@ -371,14 +428,15 @@ function ptView(id) {
         <div class="box">ASSESSMENT/PLAN:</div>
         <div class="pp">Diet is regular.<br>Activity is as tolerated.</div>
         <div class="pp click" data-edit="psych">${n.plan[0] && pt.psych?.dx ? esc(n.plan[0]).replace(/\n/g, "<br>") : `<span class="muted">Add the primary (psych) diagnosis…</span>`}</div>
-        ${live.map(p => `<div class="pp click" data-prob="${p.id}" id="p-${p.id}">${probPara(pt, p, "plan", fs)}</div>`).join("")}
+        ${live.filter(p => p.planOnly).map(p => `<div data-slot="${p.id}"></div>`).join("")}
+        ${live.filter(p => !p.hpiOnly).map(p => `<div class="pp click" data-prob="${p.id}" id="p-${p.id}">${probPara(pt, p, "plan", fs)}</div>`).join("")}
         <div class="boxed"><div class="bl">RESOLVED PLAN:</div><div class="bc">${n.resolvedPlan.map(esc).join("<br>")}</div></div>
         <div class="box">FOLLOW UP WITH PRIMARY CARE PROVIDER FOR THE FOLLOWING:</div>
         <div class="pp">- ${esc([...n.pcp, ...(pt.pcpExtra || [])].join(", ") || "N/A")}</div>
         <div class="mini">Click any paragraph to edit · yellow = today's entry · saves automatically</div>
       </div>
     </div></div>`;
-  $$("[data-addr]").forEach(b => b.onclick = () => address(pt, b.dataset.addr));
+  $$("[data-addr]").forEach(b => b.onclick = () => busy(b, () => address(pt, b.dataset.addr)));
   $$("[data-routine]").forEach(b => b.onclick = () => setRule(b.dataset.routine, { routine: true }));
   $$("[data-always]").forEach(b => b.onclick = () => setRule(b.dataset.always, { alwaysFlag: true }));
   $$("[data-prob]").forEach(el => el.onclick = e => { if (!e.target.closest(".ed")) openEditor(pt, el.dataset.prob); });
@@ -392,7 +450,7 @@ function ptView(id) {
   $("#psy").onclick = () => psychModal(pt);
   $("#info").onclick = () => infoModal(pt);
   $("#reprint").onclick = () => reprintModal(pt);
-  $("#dl").onclick = async () => { await saveNow(pt); const { name } = await docxTarget(pt); toast(`Saved ${name} in the ${pt.status === "admit" ? "team" : pt.unit} folder`); };
+  $("#dl").onclick = e => busy(e.currentTarget, async () => { await saveNow(pt); const { name } = await docxTarget(pt); toast(`Saved ${name} in the ${pt.status === "admit" ? "team" : pt.unit} folder`); });
   $("#dc").onclick = () => discharge(pt);
   if (S.open) openEditor(pt, S.open);
 }
@@ -527,7 +585,7 @@ function openEditor(pt, pid) {
   $("#ePeK", ed).onchange = e => { p.peLine.key = e.target.value; changed(); };
   $("#ePeT", ed).oninput = e => { p.peLine.text = e.target.value; changed(); };
   $("#eDel", ed).onclick = async () => { if (await ask("Delete problem?", `Remove <b>${esc(p.name)}</b> and all its entries from this note? Use Resolve instead if it got better.`, "Delete")) { pt.problems = pt.problems.filter(q => q !== p); S.open = null; await saveNow(pt); route(); } };
-  $("#eDone", ed).onclick = async () => { S.open = null; await saveNow(pt); route(); };
+  $("#eDone", ed).onclick = e => busy(e.currentTarget, async () => { S.open = null; await saveNow(pt); route(); });
 }
 function addProblem(pt) {
   const m = modal("New problem", `<div class="f"><span>Diagnosis</span><input id="nN" placeholder="e.g. Cellulitis, left forearm"></div>
@@ -597,7 +655,7 @@ async function discharge(pt) {
   const m = modal(`Discharge ${esc(pt.name)}`, `<p class="muted" style="font-size:14px">Moves the note into ${pt.unit}'s discharge folder and takes them off the list.</p>
     <label class="chk"><input type="checkbox" id="dSeen"><div>We saw them today<small>Print today's note before moving it</small></div></label>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="dGo">Discharge</button>`);
-  $("#dGo", m).onclick = async () => {
+  $("#dGo", m).onclick = e => busy(e.currentTarget, async () => {
     if ($("#dSeen", m).checked) await printPdf([progressBlocks(pt, S.date, { provider: S.provider })], `${pt.file}.pdf`);
     await saveNow(pt);
     try {
@@ -607,7 +665,7 @@ async function discharge(pt) {
     } catch (e) { toast("Couldn't move the Word file: " + e.message); }
     pt.status = "discharged"; pt.dischargedOn = S.date; await S.store.savePatient(pt, true);
     m.close(); toast(`${pt.name} discharged`); location.hash = `unit-${pt.unit}`;
-  };
+  });
 }
 
 // ---------------- vitals (grid + phone camera) ----------------
@@ -636,7 +694,7 @@ function vitalsModal(unit, focusId) {
   $$("[data-clr]", m).forEach(b => b.onclick = () => $$("input", b.closest("tr")).forEach(i => i.value = ""));
   $("#vAll", m).onclick = () => $$(".vgrid input", m).forEach(i => i.value = "");
   if (focusId) setTimeout(() => $(`tr[data-id="${focusId}"] input`, m)?.focus(), 80);
-  $("#vSave", m).onclick = async () => {
+  $("#vSave", m).onclick = e => busy(e.currentTarget, async () => {
     for (const tr of $$("tr[data-id]", m)) {
       const pt = findPt(tr.dataset.id), v = {};
       $$("input", tr).forEach(i => { if (i.value.trim()) v[i.dataset.k] = i.value.trim(); });
@@ -645,14 +703,17 @@ function vitalsModal(unit, focusId) {
       await saveNow(pt);
     }
     m.close(); toast("Vitals saved"); route();
-  };
+  });
 }
 
 // ---------------- prep ----------------
 async function prepUnit(u) {
   const list = unitPts(u), review = [], tomorrow = E.addDays(S.date, 1);
-  let quiet = 0, converted = [];
+  let quiet = 0, converted = [], i = 0;
+  const pg = progress(`Prepping ${u} for ${md(tomorrow)}`);
+  try {
   for (const pt of list) {
+    pg.set(`${pt.name} (${++i} of ${list.length})`, i / list.length);
     if (pt.status === "admit") {                       // day 2: H&P becomes the running progress note
       if (pt.admitDate > S.date) continue;
       const { dir, name } = await docxTarget(pt);
@@ -664,6 +725,7 @@ async function prepUnit(u) {
     if (r.review.length) review.push({ pt, items: r.review }); else quiet++;
     await saveNow(pt);
   }
+  } finally { pg.close(); }
   const m = modal(`Prep ${u} for ${md(tomorrow)}`, `
     <div class="lbl">Copied forward quietly</div><p class="muted">${quiet} patient${quiet === 1 ? "" : "s"} with no changes today.</p>
     ${converted.length ? `<div class="lbl">H&amp;P converted to follow-up</div><p class="muted">${converted.map(esc).join(", ")}</p>` : ""}
@@ -703,7 +765,8 @@ function printModal(list) {
   $$("[data-c]", m).forEach(c => c.onchange = upd); upd();
   $("#pGo", m).onclick = async () => {
     S.provider = $("#pP", m).value; m.close();
-    for (const pt of list) await writeDocx(pt).catch(() => {});
+    const pg = progress(`Getting ${list.length} notes ready`);
+    try { let i = 0; for (const pt of list) { pg.set(`${pt.name} (${++i} of ${list.length})`, i / list.length); await writeDocx(pt).catch(() => {}); } } finally { pg.close(); }
     printPdf(list.map(pt => blocksFor(pt, S.date, { provider: S.provider })), `${list[0].unit} ${md(S.date).replace("/", "-")}.pdf`);
   };
 }
@@ -755,7 +818,7 @@ function hpForm(id) {
   const wireRows = () => $$(".hpP").forEach(r => { $("[data-rmp]", r).onclick = () => r.remove(); $$("label.chip", r).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked))); });
   wireRows();
   $("#hAddP").onclick = () => { $("#hProbs").insertAdjacentHTML("beforeend", probRow()); wireRows(); };
-  $("#hSave").onclick = async () => {
+  $("#hSave").onclick = e => busy(e.currentTarget, async () => {
     const name = $("#hN").value.trim(); if (!name) return toast("Add the patient's name");
     const admit = $("#hA").value || S.date, age = parseInt($("#hAge").value) || "";
     const rec = pt || { id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + uid(), status: "admit", problems: [], vitals: {}, times: {}, refusing: [], labs: [], pendingLabs: [] };
@@ -779,7 +842,7 @@ function hpForm(id) {
     if (!pt) S.pts.push(rec);
     if (oldFile && oldFile !== `${rec.file} ADMIT.docx`) { try { await S.store.root.removeEntry(oldFile); } catch {} }
     await saveNow(rec); toast(`Saved "${rec.file} ADMIT.docx" in the team folder`); location.hash = "pt-" + rec.id;
-  };
+  });
 }
 function editScribes() {
   const m = modal("Scribe names", `<div class="f"><span>One name per line (shows in the H&amp;P scribe dropdown)</span><textarea id="sc" rows="6">${esc((S.settings.scribes || []).join("\n"))}</textarea></div>`,
