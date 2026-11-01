@@ -180,3 +180,27 @@ ul.dash{list-style:none;padding-left:34px;margin:6px 0}
 ul.dash li{position:relative}
 ul.dash li::before{content:"-";position:absolute;left:-20px}
 .savepill{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));background:var(--chrome);color:var(--chromeText);font-size:12.5px;font-weight:600;padding:8px 12px;border-radius:20px;z-index:40;box-shadow:0 6px 18px rgba(0,0,0,.2);animation:pop .25s ease-out}
+
+.today{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15;font-size:13px}
+.oldbtn{background:none;border:none;color:var(--chromeDim);font-size:11.5px;padding:2px 0;text-decoration:underline;text-underline-offset:2px}
+.oldbtn.on{color:#1d1b17;background:var(--amb);text-decoration:none;border-radius:6px;padding:2px 7px;font-weight:600}
+#ov{overflow:hidden}
+.ovu{border-bottom:1px solid var(--paperLine)}.ovu:last-child{border:none}
+.ovh{display:flex;align-items:center;gap:12px;padding:11px 14px;cursor:pointer;transition:background .2s}
+.ovh:hover{background:var(--hover)}
+.ovn{font-weight:700;font-size:13px;letter-spacing:.04em;width:82px;flex:none}
+.sq{display:flex;flex-wrap:wrap;gap:5px;flex:1}
+.s{width:18px;height:18px;border-radius:5px;display:block;transition:transform .15s ease-out}
+.s:hover{transform:scale(1.2)}
+.s.g{background:#3fb97f}.s.a{background:var(--amb)}.s.r{background:var(--red)}
+.chev{color:var(--dim);transition:transform .25s ease-out}
+.ovu.open .chev{transform:rotate(90deg)}
+.ovb{display:none;padding:0 10px 10px;overflow:auto}
+.ovu.open .ovb{display:block;animation:in .25s ease-out}
+.ovt{width:100%;border-collapse:collapse;font-size:12.5px}
+.ovt th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);padding:6px;border-bottom:1px solid var(--paperLine)}
+.ovt td{padding:7px 6px;border-bottom:1px solid var(--paperLine);vertical-align:top}
+.ovt tr[onclick]{cursor:pointer}.ovt tr[onclick]:hover td{background:var(--hover)}
+.ovt td.nm{font-family:var(--serif);font-size:14px;white-space:nowrap}
+.ovt.rules input,.ovt.rules select{border:1px solid var(--paperLine);background:var(--paper);border-radius:6px;padding:5px 6px;font-size:12.5px;width:100%;min-width:90px}
+.ovt.rules input:disabled,.ovt.rules select:disabled{opacity:.6}

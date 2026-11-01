@@ -193,4 +193,14 @@ t("imported problem with an undated plan copies its opening as Cont./CTM", () =>
   assert.equal(pt.problems[0].hpi.length, 2);
 });
 
+t("team wording rules apply during prep", () => {
+  const pt = fake(); E.prep(pt, "2026-10-29");
+  const rules = { dx: { "Gastroesophageal reflux disease": { status: "denies acid reflux today" } },
+    wording: [{ status: "active", field: "plan", find: "Cont.", replace: "Continue" }, { status: "pending", find: "Patient", replace: "Pt" }] };
+  E.prep(pt, "2026-10-30", rules);
+  const g = pt.problems[1];
+  assert.equal(g.hpi.at(-1).text, "Patient taking Omeprazole, denies acid reflux today.");
+  assert.equal(g.plan.at(-1).text, "Continue Omeprazole.");
+});
+
 console.log(`\n${pass} passed`);

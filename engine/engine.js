@@ -109,7 +109,7 @@ export function courseEnd(p) {
   return best;
 }
 
-export function defaultHpi(patient, p, date) {
+export function defaultHpi(patient, p, date, rules) {
   if (p.copy && !p.meds.length) {
     const last = lastEntry(p.hpi, date);
     if (last) return end(swapVitals(patient, forwardHpi(last.text, courseStart(p) || last.date), date));
@@ -138,7 +138,9 @@ export function defaultHpi(patient, p, date) {
   if (refusing.length) parts.push(`${parts.length ? "" : "Patient "}refusing ${join(refusing.map(m => m.name))}`.trim());
 
   let status;
+  const custom = rules?.dx?.[p.name]?.status;               // team rule: preferred wording for this diagnosis
   if (v !== null) status = `${vitalLabel[p.autoVital]} today is ${v}`;
+  else if (custom && taking.length) status = custom;
   else if (taking.length) status = `reports ${p.symptom || p.name.toLowerCase()} managed well with medications`;
   else status = `reports baseline ${p.symptom || p.name.toLowerCase()} symptoms today`;
 
@@ -185,6 +187,18 @@ export const planOpening = p => {
   return ms.length ? `Will treat with ${join(ms.map(m => medFull(m) + (m.end ? ` (last dose ${md(m.end)})` : "")))}` : "Will continue to monitor";
 };
 
+// Team wording rules ("always write X instead of Y"), approved by the supervisor.
+export function applyRules(text, p, field, rules) {
+  const n = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  for (const r of rules?.wording || []) {
+    if (r.status !== "active" || !r.find) continue;
+    if (r.field && r.field !== "both" && r.field !== field) continue;
+    if (r.dx && n(r.dx) !== n(p.name)) continue;
+    text = text.split(r.find).join(r.replace ?? "");
+  }
+  return text.replace(/\s{2,}/g, " ").trim();
+}
+
 // ---------- flags ----------
 // Each flag: { level: "red" | "amber" | "blue" | "soft", text, problemId? }
 export function flags(patient, date, rulebook = {}) {
@@ -221,7 +235,7 @@ export function flags(patient, date, rulebook = {}) {
 // ---------- prep for tomorrow ----------
 // Adds tomorrow's HPI and plan entry to every active problem.
 // Quiet when nothing changed today; returns a review list for anything that did.
-export function prep(patient, today) {
+export function prep(patient, today, rules) {
   const tomorrow = addDays(today, 1);
   const review = [];
   for (const p of patient.problems) {
@@ -248,8 +262,8 @@ export function prep(patient, today) {
       if (m.end === today) reasons.push(`${m.name} ends today`);
     }
     const skipHpi = p.planOnly, skipPlan = p.hpiOnly;
-    const hpi = defaultHpi(patient, p, tomorrow);
-    const plan = defaultPlan(patient, p, tomorrow);
+    const hpi = applyRules(defaultHpi(patient, p, tomorrow, rules), p, "hpi", rules);
+    const plan = applyRules(defaultPlan(patient, p, tomorrow), p, "plan", rules);
     if (!skipHpi && !p.hpi.some(e => e.date === tomorrow)) p.hpi.push({ date: tomorrow, text: hpi, auto: hpi });
     if (!skipPlan && !p.plan.some(e => e.date === tomorrow)) p.plan.push({ date: tomorrow, text: plan, auto: plan });
     if (reasons.length) { p.needsReview = true; review.push({ problemId: p.id, name: p.name, reasons, hpi, plan }); }
