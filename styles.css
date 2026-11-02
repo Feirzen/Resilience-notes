@@ -189,7 +189,7 @@ ul.dash li::before{content:"-";position:absolute;left:-20px}
 .ovh{display:flex;align-items:center;gap:12px;padding:11px 14px;cursor:pointer;transition:background .2s}
 .ovh:hover{background:var(--hover)}
 .ovn{font-weight:700;font-size:13px;letter-spacing:.04em;width:82px;flex:none}
-.sq{display:flex;flex-wrap:wrap;gap:5px;flex:1}
+
 .s{width:18px;height:18px;border-radius:5px;display:block;transition:transform .15s ease-out}
 .s:hover{transform:scale(1.2)}
 .s.g{background:#3fb97f}.s.a{background:var(--amb)}.s.r{background:var(--red)}
@@ -204,3 +204,18 @@ ul.dash li::before{content:"-";position:absolute;left:-20px}
 .ovt td.nm{font-family:var(--serif);font-size:14px;white-space:nowrap}
 .ovt.rules input,.ovt.rules select{border:1px solid var(--paperLine);background:var(--paper);border-radius:6px;padding:5px 6px;font-size:12.5px;width:100%;min-width:90px}
 .ovt.rules input:disabled,.ovt.rules select:disabled{opacity:.6}
+
+.back{width:34px;height:34px;border-radius:9px;background:var(--chrome2);border:1px solid var(--chromeLine);color:var(--chromeText);font-size:22px;line-height:1;display:grid;place-items:center;padding-bottom:3px;transition:transform .15s ease-out}
+.back:active{transform:scale(.94)}
+.chip.sug{padding:3px 8px;font-size:11.5px}
+.chip.sug:hover{background:var(--accent);color:var(--accentInk);border-color:var(--accent)}
+.stickies{display:flex;flex-direction:column;gap:8px;margin-bottom:10px;align-items:flex-start}
+.sticky{width:100%;border-radius:10px;padding:9px 12px;font-size:13.5px;line-height:1.45;box-shadow:var(--shadow);animation:in .25s ease-out;border-left:4px solid}
+.sticky.quick{background:#fff6cf;border-color:#e2b93b;color:#3b3110}
+.sticky.keep{background:#e7f1fb;border-color:#4f7cff;color:#18263f}
+[data-theme=dark] .sticky.quick{background:#3d3412;color:#f5e9b8}[data-theme=dark] .sticky.keep{background:#18263f;color:#cfe0ff}
+.sticky .sh{display:flex;gap:8px;align-items:center;margin-bottom:3px;font-size:12px}
+.sticky .btn.sm{padding:2px 7px;font-size:11px;background:rgba(255,255,255,.6)}
+.tag.note{color:#8a5600;border-color:#e2b93b}
+.ovt.xl td{font-size:12.5px}.ovt.xl tr[data-pt]{cursor:pointer}.ovt.xl tr[data-pt]:hover td{background:var(--hover)}
+.ovt .cell{width:52px;border:1px solid var(--paperLine);background:var(--paper);border-radius:6px;padding:3px 5px;font-size:12.5px;text-align:center}

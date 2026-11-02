@@ -7,6 +7,7 @@ import { toPdf } from "./lib/pdf-out.js";
 import { Store, supported } from "./lib/store.js";
 import { startPairing } from "./lib/pair.js";
 import { demoPatients } from "./lib/demo.js";
+import { MED_NAMES, findMed, abbr } from "./lib/meds.js";
 
 // ---------------- state & helpers ----------------
 const localToday = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
@@ -29,7 +30,12 @@ function toast(msg, ms = 2400) {
 function modal(title, body, foot = "", wide = false) {
   const s = document.createElement("div"); s.className = "scrim";
   s.innerHTML = `<div class="modal ${wide ? "wide" : ""}" role="dialog"><div class="mh">${title}<span class="sp"></span><button class="btn sm" data-x style="background:transparent;color:inherit;border-color:rgba(255,255,255,.25)">Close</button></div><div class="mb">${body}</div>${foot ? `<div class="mfoot">${foot}</div>` : ""}</div>`;
-  const close = () => { s.remove(); s.onclose?.(); };
+  const close = async (force) => {
+    if (force !== true && s.dirty && !(await ask("Unsaved changes", "You typed something here that isn't saved yet. Close without saving?", "Close without saving"))) return;
+    s.remove(); s.onclose?.();
+  };
+  s.addEventListener("input", () => { s.dirty = true; });
+  s.addEventListener("click", e => { if (e.target.closest(".mfoot .btn.p")) s.dirty = false; }, true);   // the Save button
   s.addEventListener("click", e => { if (e.target === s || e.target.closest("[data-x]")) close(); });
   document.body.append(s); s.close = close; return s;
 }
@@ -167,6 +173,7 @@ function shell() {
   const curUnit = hash.startsWith("unit-") ? hash.slice(5) : hash.startsWith("pt-") ? findPt(hash.slice(3))?.unit : null;
   $("#top").innerHTML = `
     <div class="bar">
+      ${S.store && hash && hash !== "home" ? `<button class="back" id="back" aria-label="Back">‹</button>` : ""}
       <img class="logo" src="icons/favicon.svg" alt="">
       <span class="brand">RESILIENCE NOTES</span>
       ${S.store?.demo ? `<span class="pill a" style="font-size:10px">DEMO</span>` : ""}
@@ -181,6 +188,7 @@ function shell() {
     }).join("")}</nav>` : ""}`;
   $("#oldNotes").onclick = () => S.viewDate ? (S.viewDate = null, route()) : oldNotesModal();
   $("#gear").onclick = toggleTray;
+  $("#back")?.addEventListener("click", goBack);
 }
 function toggleTray() {
   const old = $(".tray"); if (old) { old.remove(); $("#gear").classList.remove("open"); return; }
@@ -223,7 +231,30 @@ function route() {
   if (h === "rules") return rulesPage();
   return home();
 }
-window.addEventListener("hashchange", () => { S.open = null; route(); });
+// ---------------- unsaved-changes guard ----------------
+// The note editor works on a copy until Save; leaving first asks "Save / Discard / Keep editing".
+const isDirty = () => !!(S.snap?.dirty || S.formDirty);
+function discard() {
+  if (S.snap) { const pt = findPt(S.snap.id); if (pt) { for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, S.snap.data); } }
+  S.snap = null; S.formDirty = false; S.open = null;
+}
+function leaveGuard(go) {
+  if (!isDirty()) return go();
+  const m = modal("Wait, you have unsaved changes", `<p class="muted" style="font-size:14px">${S.formDirty ? "This form" : "This note"} has changes that aren't saved. If you leave now they'll be lost.</p>`,
+    `<button class="btn" data-x>Keep editing</button><button class="btn warn" id="lgD">Don't save</button><button class="btn p" id="lgS">Save</button>`);
+  $("#lgD", m).onclick = () => { m.close(true); discard(); go(); };
+  $("#lgS", m).onclick = e => busy(e.currentTarget, async () => {
+    if (S.formDirty) { m.close(true); return $("#hSave")?.click(); }
+    const pt = findPt(S.snap.id); S.snap = null; S.open = null; await saveNow(pt); m.close(true); go();
+  });
+}
+let lastHash = location.hash;
+window.addEventListener("hashchange", () => {
+  if (isDirty()) { const want = location.hash; history.replaceState(null, "", lastHash || "#home"); leaveGuard(() => { lastHash = want; location.hash = want; }); return; }
+  lastHash = location.hash; S.open = null; route();
+});
+window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
+const goBack = () => { const h = location.hash.slice(1); location.hash = h.startsWith("pt-") ? "unit-" + (findPt(h.slice(3))?.unit || "") : h.startsWith("hp-") && h !== "hp-new" ? "pt-" + h.slice(3) : "home"; };
 
 // ---------------- welcome / folder ----------------
 function welcome() {
@@ -293,25 +324,43 @@ function home() {
         <div class="ln">${l.length} patient${l.length === 1 ? "" : "s"}${l.some(p => p.status === "admit") ? ` · ${l.filter(p => p.status === "admit").length} admit` : ""}</div>
         <div class="ln">${prepped(u) ? "✓ Prepped for " + md(tomorrow) : "Not prepped for " + md(tomorrow) + " yet"}</div></a>`;
     }).join("")}</div>
-    <h2>All patients</h2>
+    <div class="row" style="margin:18px 0 8px"><h2 style="margin:0">All patients</h2><span class="sp"></span><button class="btn sm" id="ovAll">${S.ovAll ? "Collapse all" : "Expand all"}</button></div>
     <div class="card" id="ov">${UNITS.map(u => {
-      const l = unitPts(u);
-      return `<div class="ovu ${S.expanded?.has(u) ? "open" : ""}" data-u="${u}"><div class="ovh"><span class="ovn">${u.toUpperCase()}</span>
-        <span class="sq">${l.map(p => { const f = flagsFor(p); const c = f.some(x => x.level === "red") ? "r" : f.some(x => x.level === "amber") ? "a" : "g";
-          return `<a class="s ${c}" href="#pt-${p.id}" title="${esc(p.name)}"></a>`; }).join("") || `<span class="muted">empty</span>`}</span>
-        <span class="chev">▸</span></div>
-        <div class="ovb">${l.length ? `<table class="ovt"><tr><th>Patient</th><th>Admitted</th><th>Diagnoses</th><th>Needs attention</th><th>Status</th></tr>
-          ${l.map(p => { const live = p.problems.filter(q => !(q.resolved && q.resolved < S.today));
-            const f = loud(flagsFor(p)); const days = p.admitDate ? Math.round((new Date(S.today) - new Date(p.admitDate)) / 864e5) + 1 : "";
-            return `<tr onclick="location.hash='pt-${p.id}'"><td class="nm">${esc(p.name)}</td><td>${p.admitDate ? md(p.admitDate) + ` <span class="muted">(day ${days})</span>` : "—"}</td>
-              <td>${live.map(q => esc(q.name)).join(", ") || `<span class="muted">No medical concerns</span>`}</td>
-              <td>${f.map(x => `<span class="mf ${x.level}">${esc(x.text)}</span>`).join(" ") || `<span class="muted">—</span>`}</td>
-              <td>${p.status === "admit" ? "H&amp;P" : lastDate(p) > S.today ? "Prepped " + md(lastDate(p)) : "Today"}</td></tr>`; }).join("")}</table>` : `<p class="muted" style="padding:10px">No patients.</p>`}</div></div>`;
+      const l = unitPts(u), open = S.ovAll || S.expanded?.has(u);
+      const nFlag = l.filter(p => loud(flagsFor(p)).length).length;
+      return `<div class="ovu ${open ? "open" : ""}" data-u="${u}"><div class="ovh"><span class="ovn">${u.toUpperCase()}</span>
+        <span class="muted">${l.length} patient${l.length === 1 ? "" : "s"}${nFlag ? ` · ${nFlag} with pertinent issues` : ""}</span><span class="sp"></span><span class="chev">▸</span></div>
+        <div class="ovb">${l.length ? `<table class="ovt xl"><tr><th></th><th>Patient Name</th><th>Pertinent Issues</th><th>Medical Diagnoses</th><th>Psychiatric Diagnosis</th><th>Insulin?</th><th>Billing</th><th>Always 3?</th></tr>
+          ${l.map((p, i) => { const live = p.problems.filter(q => !(q.resolved && q.resolved < S.today));
+            const f = loud(flagsFor(p)).map(x => x.text);
+            const ins = live.some(q => q.meds.some(m => /insulin|lantus|humalog|novolog|glargine|lispro/i.test(m.name)) || /insulin/i.test([...q.plan, ...q.hpi].map(e => e.text).join(" ")));
+            return `<tr data-pt="${p.id}"><td class="muted">${i + 1}</td><td class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}</td>
+              <td>${esc([...f, ...(p.notes || []).filter(n => n.kind === "keep").map(n => n.text)].join("; "))}</td>
+              <td>${live.map(q => esc(abbr(q.name))).join(", ") || "None"}</td><td>${esc(p.psych?.dx || "")}</td><td>${ins ? "Y" : ""}</td>
+              <td><input class="cell" data-bill value="${esc(p.billing || "")}" maxlength="3"></td>
+              <td><select class="cell" data-a3>${["~", "P", "M", "OD"].map(o => `<option ${(p.always3 || autoA3(p, live)) === o ? "selected" : ""}>${o}</option>`).join("")}</select></td></tr>`; }).join("")}</table>` : `<p class="muted" style="padding:10px">No patients.</p>`}</div></div>`;
     }).join("")}</div>
+    <p class="muted" style="margin-top:6px">Always 3?: P always level 3 · ~ level 3 on admit, then mental status · M pertinent medical issue · OD overdose. Billing and Always 3 save as you change them.</p>
     ${waiting.length ? `<h2>New admits (H&amp;P)</h2><div class="card list">${waiting.map(p => `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}<span class="tag">ADMIT</span></span><span class="mk q">${p.unit} · admitted ${md(p.admitDate)}</span></a>`).join("")}</div>` : ""}
     ${S.store.demo ? `<p class="warnbox">Demo mode: every patient here is fake, and nothing touches the U: drive.</p>` : ""}`;
   $("#imp").onclick = e => busy(e.currentTarget, importNotes);
-  $$(".ovh").forEach(h => h.onclick = e => { if (e.target.closest("a")) return; const u = h.parentElement.dataset.u; (S.expanded ||= new Set()).has(u) ? S.expanded.delete(u) : S.expanded.add(u); h.parentElement.classList.toggle("open"); });
+  $$(".ovh").forEach(h => h.onclick = () => { const u = h.parentElement.dataset.u; (S.expanded ||= new Set()).has(u) ? S.expanded.delete(u) : S.expanded.add(u); h.parentElement.classList.toggle("open"); });
+  $("#ovAll").onclick = () => { S.ovAll = !S.ovAll; if (!S.ovAll) S.expanded = new Set(); home(); };
+  $$("tr[data-pt]").forEach(tr => {
+    const pt = findPt(tr.dataset.pt);
+    tr.onclick = e => { if (!e.target.closest(".cell")) location.hash = "pt-" + pt.id; };
+    $("[data-bill]", tr).onchange = e => { pt.billing = e.target.value.trim(); saveNow(pt, { docx: false }); toast("Saved"); };
+    $("[data-a3]", tr).onchange = e => { pt.always3 = e.target.value; saveNow(pt, { docx: false }); toast("Saved"); };
+  });
+}
+
+// Always-3 code, guessed from the note (the provider can override it in the table).
+function autoA3(p, live) {
+  const names = live.map(q => q.name).join(" ") + " " + (p.psych?.dx || "");
+  if (/overdose|\bOD\b/i.test(names)) return "OD";
+  if (/suicide attempt|schizophrenia/i.test(names)) return "P";
+  if (loud(flagsFor(p)).some(f => f.level === "red")) return "M";
+  return "~";
 }
 
 // ---------------- import old Word notes ----------------
@@ -392,13 +441,14 @@ function unitView(u) {
     && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.today)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
-      <button class="btn" id="vit">Vitals</button><button class="btn" id="prn">Print unit</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
+      <button class="btn" id="qn">+ Quick note</button><button class="btn" id="vit">Vitals</button><button class="btn" id="prn">Print unit</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
     ${preppedCount ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">${preppedCount} of ${l.length} notes prepped for ${md(tmw)}.<span class="sp"></span><button class="btn sm" id="unprepU">Unprep ${u}</button></div>` : ""}
     <div class="row" style="margin:-4px 0 10px"><span class="sp"></span><button class="btn sm" id="reimp" title="Start this unit over from the original Word files">Start ${u} over from the original files</button></div>
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
       const fs = loud(flagsFor(p)); const top = fs.find(f => f.level === "red") || fs[0];
-      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}</span>
+      const qn = (p.notes || []).filter(n => n.kind === "quick" && !n.done).length;
+      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}${qn ? `<span class="tag note">📝 ${qn}</span>` : ""}</span>
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
     }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>`;
   $("#reimp").onclick = e => busy(e.currentTarget, () => restartUnit(u));
@@ -407,6 +457,7 @@ function unitView(u) {
     const pg = progress(`Unprepping ${u}`); try { await pool(l.filter(isPrepped), 6, p => unprep(p)); } finally { pg.close(); } toast(`${u} is back to ${md(S.today)}`); route();
   }));
   $("#vit").onclick = () => vitalsModal(u);
+  $("#qn").onclick = () => stickyModal(l);
   $("#prn").onclick = () => printModal(unitPts(u));
   $("#prep").onclick = e => busy(e.currentTarget, () => prepUnit(u));
   $("#catch")?.addEventListener("click", e => busy(e.currentTarget, async () => {
@@ -475,6 +526,7 @@ function ptView(id) {
         ${pt.status === "admit" ? `<a class="btn sm" href="#hp-${pt.id}" style="text-decoration:none">Edit H&amp;P</a>` : ""}
         <span class="sp"></span><button class="btn sm" id="reprint">Print</button>
         <button class="btn sm warn" id="dc">Discharge</button></div>
+      ${stickyPanel(pt)}
       <div class="paper" id="paper">
         <div class="hdr"><span>${esc(pt.name)}</span><span>DOB ${esc(pt.dob || "—")} · MRN ${esc(pt.mrn || "—")}</span><span>Unit: ${pt.unit}</span><span>${md(date)}/${date.slice(0, 4)}</span></div>
         <div class="ttl">${pt.status === "admit" ? "HISTORY AND PHYSICAL EXAMINATION" : "MEDICAL PROGRESS NOTE:"}</div>
@@ -501,6 +553,7 @@ function ptView(id) {
         <div class="mini">Click any paragraph to edit · yellow = today's entry · saves automatically</div>
       </div>
     </div></div>`;
+  wireSticky(pt);
   $$("[data-addr]").forEach(b => b.onclick = () => busy(b, () => address(pt, b.dataset.addr)));
   $$("[data-routine]").forEach(b => b.onclick = () => setRule(b.dataset.routine, { routine: true }));
   $$("[data-always]").forEach(b => b.onclick = () => setRule(b.dataset.always, { alwaysFlag: true }));
@@ -534,6 +587,37 @@ async function address(pt, text) {
 async function setRule(name, rule) {
   if (!isSup()) return suggest({ type: "dx", dx: name, change: rule, note: rule.routine ? "Mark routine" : "Always flag" });
   S.rules.dx[name] = { ...(S.rules.dx[name] || {}), ...rule }; await saveRules(); toast(rule.routine ? `${name} marked routine` : `${name} will always be flagged`); route(); }
+
+// ---------------- sticky notes ----------------
+// "keep" notes stay with the patient (triggers, what works). "quick" notes are shorthand to write up later.
+function stickyPanel(pt) {
+  const ns = pt.notes || [], quick = ns.filter(n => n.kind === "quick" && !n.done), keep = ns.filter(n => n.kind === "keep");
+  if (S.viewDate) return "";
+  return `<div class="stickies">${[...quick, ...keep].map(n => `<div class="sticky ${n.kind}"><div class="sh"><b>${n.kind === "quick" ? "To write up" : "Keep in mind"}</b><span class="muted">${md(n.date)}</span><span class="sp"></span>
+      ${n.kind === "quick" ? `<button class="btn sm" data-sdone="${n.id}" title="I wrote this into the note">✓ Written up</button>` : ""}<button class="btn sm" data-sdel="${n.id}" title="Delete">✕</button></div><div>${esc(n.text).replace(/\n/g, "<br>")}</div></div>`).join("")}
+    <button class="btn sm" id="addSticky">+ Sticky note</button></div>`;
+}
+function stickyModal(pts, preselect) {
+  const m = modal("Sticky note", `${pts.length > 1 ? `<div class="f"><span>Patient</span><select id="sP">${pts.map(p => `<option value="${p.id}" ${p.id === preselect ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>` : ""}
+    <div class="row" style="margin-bottom:8px"><span class="chip on" data-k="quick">Quick note (write up later)</span><span class="chip" data-k="keep">Keep with patient</span></div>
+    <div class="f"><textarea id="sT" rows="4" placeholder="e.g. HA, start Tylenol 650 Q6H PRN"></textarea></div>
+    <p class="muted" id="sHelp">Shows on the patient until you mark it written up.</p>`,
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="sGo">Save note</button>`);
+  let kind = "quick"; setTimeout(() => $("#sT", m)?.focus(), 50);
+  $$("[data-k]", m).forEach(c => c.onclick = () => { kind = c.dataset.k; $$("[data-k]", m).forEach(x => x.classList.toggle("on", x === c));
+    $("#sHelp", m).textContent = kind === "keep" ? "Stays on the patient every day (triggers, what they respond well to). Shows in the overview's Pertinent Issues." : "Shows on the patient until you mark it written up."; });
+  $("#sGo", m).onclick = async () => {
+    const text = $("#sT", m).value.trim(); if (!text) return;
+    const pt = pts.length > 1 ? findPt($("#sP", m).value) : pts[0];
+    (pt.notes ||= []).push({ id: uid(), kind, text, date: S.today }); m.close(true);
+    await saveNow(pt, { docx: false }); toast("Note saved"); route();
+  };
+}
+function wireSticky(pt) {
+  $("#addSticky")?.addEventListener("click", () => stickyModal([pt]));
+  $$("[data-sdone]").forEach(b => b.onclick = async () => { pt.notes.find(n => n.id === b.dataset.sdone).done = S.today; await saveNow(pt, { docx: false }); route(); });
+  $$("[data-sdel]").forEach(b => b.onclick = async () => { if (await ask("Delete this note?", "It will be gone for everyone.", "Delete")) { pt.notes = pt.notes.filter(n => n.id !== b.dataset.sdel); await saveNow(pt, { docx: false }); route(); } });
+}
 
 // Undo a prep: drop entries after today; an H&P converted today goes back to being an H&P.
 async function unprep(pt) {
@@ -576,10 +660,14 @@ function syncPlan(pt, p) {
   const e = todayEntry(pt, p, "plan");
   if (e.text === e.auto) { e.text = e.auto = dPlan(pt, p, S.date); }
 }
+function doseChips(m) {
+  const opts = findMed(m.name); if (!opts) return "";
+  return `<span class="muted">Common:</span>` + opts.map((o, i) => `<span class="chip sug" data-sug="${i}">${esc([o.dose, o.route, o.freq, o.prn ? "PRN" : ""].filter(Boolean).join(" "))}</span>`).join("");
+}
 function medRow(pt, p, m) {
   const ref = (pt.refusing || []).includes(m.id);
   return `<div class="med" data-med="${m.id}">
-    <input data-k="name" value="${esc(m.name)}" placeholder="Medication">
+    <input data-k="name" value="${esc(m.name)}" placeholder="Medication" list="medList" autocomplete="off">
     <input data-k="dose" value="${esc(m.dose || "")}" placeholder="Dose">
     <input data-k="route" value="${esc(m.route || "")}" placeholder="Route">
     <input data-k="freq" value="${esc(m.freq || "")}" placeholder="Freq">
@@ -592,6 +680,7 @@ function medRow(pt, p, m) {
       <span class="chip ${m.discontinued === S.date ? "on" : ""}" data-t="stop">${m.discontinued === S.date ? "Stopping today" : "Stop today"}</span>
       ${m.start === S.date ? `<span class="muted">· started today</span>` : m.changedOn === S.date ? `<span class="muted">· dose changed today</span>` : ""}
     </div>
+    <div class="x" data-sugg>${doseChips(m)}</div>
     <div class="x" data-dates ${m.end ? "" : "hidden"}>Start <input type="date" data-k="start" value="${m.start}" style="width:auto">
       Last dose <input type="date" data-k="end" value="${m.end || ""}" style="width:auto"> or <input data-days placeholder="# days" style="width:80px"></div>
   </div>`;
@@ -600,6 +689,7 @@ function openEditor(pt, pid) {
   const p = pt.problems.find(q => q.id === pid); if (!p) return;
   $$(".ed").forEach(e => e.remove()); $$(".pp.open").forEach(e => e.classList.remove("open"));
   S.open = pid;
+  if (!S.snap || S.snap.id !== pt.id) S.snap = { id: pt.id, data: structuredClone(pt), dirty: false };
   const firstDay = p.start === S.date;
   const hE = firstDay && !p.hpiOpen ? (p.hpi.find(e => e.date === S.date) || (p.hpi.push({ date: S.date, text: "", auto: "" }), p.hpi.at(-1))) : todayEntry(pt, p, "hpi");
   const pE = firstDay ? null : todayEntry(pt, p, "plan");
@@ -627,10 +717,11 @@ function openEditor(pt, pid) {
     </div>
     <div id="ePe" ${p.peLine ? "" : "hidden"} style="margin-top:6px"><div class="grid2"><select id="ePeK">${PE_LINES.map(([k]) => `<option ${p.peLine?.key === k ? "selected" : ""}>${k}</option>`).join("")}</select>
       <input id="ePeT" value="${esc(p.peLine?.text || "")}" placeholder="New exam line"></div></div>
-    <div class="row" style="margin-top:12px"><button class="btn sm warn" id="eDel">Delete problem</button><button class="btn sm" id="eTeach" title="Turn this fix into a rule for everyone">🎓 Make this a rule</button><span class="sp"></span><button class="btn p" id="eDone">Done</button></div>`;
+    <div class="row" style="margin-top:12px"><button class="btn sm warn" id="eDel">Delete problem</button><button class="btn sm" id="eTeach" title="Turn this fix into a rule for everyone">🎓 Make this a rule</button><span class="sp"></span>
+      <span class="muted" id="eUns" ${S.snap?.dirty ? "" : "hidden"}>Not saved yet</span><button class="btn" id="eCancel">Cancel</button><button class="btn p ${S.snap?.dirty ? "go" : ""}" id="eDone">Save</button></div>`;
   slot.append(ed);
   ed.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  const changed = (docx = true) => { refreshParas(pt, p); save(pt, { docx }); };
+  const changed = () => { refreshParas(pt, p); S.snap.dirty = true; $("#eDone", ed)?.classList.add("go"); const u = $("#eUns", ed); if (u) u.hidden = false; };
   $("#eName", ed).oninput = e => { p.name = e.target.value; changed(); };
   $("#eSym", ed).oninput = e => { p.symptom = e.target.value; const t = todayEntry(pt, p, "hpi"); if (t.text === t.auto && !firstDay) { t.text = t.auto = dHpi(pt, p, S.date); $("#eH", ed).value = t.text; } changed(); };
   $("#eH", ed).oninput = e => { hE.text = e.target.value; changed(); };
@@ -648,8 +739,15 @@ function openEditor(pt, pid) {
       if ((k === "dose" || k === "freq") && m.start < S.date && !m.home) m.changedOn = S.date;
       if ((k === "dose" || k === "freq") && m.start < S.date && m.home) m.changedOn = S.date;
       if (k === "end" && m.end) m.addressed = false;
+      if (k === "name") { $("[data-sugg]", row).innerHTML = doseChips(m); wireSugg(); }
       syncPlan(pt, p); $("#eP", ed).value = firstDay ? p.planOpen : pE.text; changed();
     });
+    const wireSugg = () => $$("[data-sug]", row).forEach(c => c.onclick = () => {
+      const o = findMed(m.name)[+c.dataset.sug]; Object.assign(m, { dose: o.dose, route: o.route, freq: o.freq, prn: o.prn });
+      if (m.start < S.date) m.changedOn = S.date;
+      syncPlan(pt, p); changed(); openEditor(pt, pid);
+    });
+    wireSugg();
     $("[data-days]", row).oninput = e => { const d = parseInt(e.target.value); if (d > 0) { m.end = E.addDays(m.start, d - 1); $('[data-k="end"]', row).value = m.end; m.addressed = false; syncPlan(pt, p); $("#eP", ed).value = firstDay ? p.planOpen : pE.text; changed(); } };
     $$("[data-t]", row).forEach(c => c.onclick = () => {
       const t = c.dataset.t;
@@ -664,7 +762,7 @@ function openEditor(pt, pid) {
     $("[data-del]", row).onclick = () => { p.meds = p.meds.filter(x => x !== m); syncPlan(pt, p); changed(); openEditor(pt, pid); };
   };
   $$(".med", ed).forEach(wireMed);
-  $("#eAdd", ed).onclick = () => { p.meds.push({ id: uid(), name: "", start: S.date }); changed(false); openEditor(pt, pid); setTimeout(() => $$(".med input", ed.isConnected ? ed : document).at(-5)?.focus(), 50); };
+  $("#eAdd", ed).onclick = () => { p.meds.push({ id: uid(), name: "", start: S.date }); changed(); openEditor(pt, pid); setTimeout(() => $$(".med input", ed.isConnected ? ed : document).at(-5)?.focus(), 50); };
   $$("[data-o]", ed).forEach(c => c.onclick = () => {
     const o = c.dataset.o;
     if (o === "alwaysFlag") p.alwaysFlag = !p.alwaysFlag;
@@ -675,8 +773,9 @@ function openEditor(pt, pid) {
   });
   $("#ePeK", ed).onchange = e => { p.peLine.key = e.target.value; changed(); };
   $("#ePeT", ed).oninput = e => { p.peLine.text = e.target.value; changed(); };
-  $("#eDel", ed).onclick = async () => { if (await ask("Delete problem?", `Remove <b>${esc(p.name)}</b> and all its entries from this note? Use Resolve instead if it got better.`, "Delete")) { pt.problems = pt.problems.filter(q => q !== p); S.open = null; await saveNow(pt); route(); } };
-  $("#eDone", ed).onclick = e => busy(e.currentTarget, async () => { S.open = null; await saveNow(pt); route(); });
+  $("#eDel", ed).onclick = async () => { if (await ask("Delete problem?", `Remove <b>${esc(p.name)}</b> and all its entries from this note? Use Resolve instead if it got better.`, "Delete")) { pt.problems = pt.problems.filter(q => q !== p); S.open = null; S.snap = null; await saveNow(pt); route(); } };
+  $("#eDone", ed).onclick = e => busy(e.currentTarget, async () => { S.open = null; S.snap = null; await saveNow(pt); toast("Saved"); route(); });
+  $("#eCancel", ed).onclick = () => { discard(); route(); };
   $("#eTeach", ed).onclick = () => teachModal(pt, p, hE, pE);
 }
 function addProblem(pt) {
@@ -684,7 +783,7 @@ function addProblem(pt) {
     <div class="f"><span>What the patient reports today</span><textarea id="nH" rows="3" placeholder="Patient presents with…"></textarea></div>
     <div class="f"><span>Symptom word</span><input id="nS" placeholder="e.g. cellulitis"></div>
     <p class="muted">Add medications in the next step. The first HPI entry is dated ${md(S.date)}.</p>`,
-    `<button class="btn" data-x>Cancel</button><button class="btn p" id="nGo">Add</button>`);
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="nGo">Save problem</button>`);
   $("#nN", m).focus();
   $("#nGo", m).onclick = async () => {
     const name = $("#nN", m).value.trim(); if (!name) return;
@@ -874,7 +973,8 @@ function hpForm(id) {
   const probRow = (p = {}) => { const m = p.meds?.[0] || {}; return `<div class="card hpP" style="padding:10px;margin-bottom:8px;box-shadow:none">
     <div class="grid2"><div class="f"><span>Diagnosis</span><input data-f="name" value="${esc(p.name || "")}"></div><div class="f"><span>Symptom word</span><input data-f="symptom" value="${esc(p.symptom || "")}" placeholder="e.g. acid reflux"></div></div>
     <div class="f"><span>HPI (what they report / take at home)</span><input data-f="hpi" value="${esc(p.hpiOpen || "")}" placeholder="Patient reports taking Omeprazole 40mg BID PRN at home to manage acid reflux"></div>
-    <div class="grid2"><div class="f"><span>Medication</span><input data-f="mname" value="${esc(m.name || "")}"></div><div class="f"><span>Dose · route · freq</span><input data-f="mdose" value="${esc([m.dose, m.route, m.freq].filter(Boolean).join(" "))}" placeholder="40mg PO BID"></div></div>
+    <div class="grid2"><div class="f"><span>Medication</span><input data-f="mname" list="medList" autocomplete="off" value="${esc(m.name || "")}"></div><div class="f"><span>Dose · route · freq</span><input data-f="mdose" value="${esc([m.dose, m.route, m.freq].filter(Boolean).join(" "))}" placeholder="40mg PO BID"></div></div>
+    <div class="row hpSug" style="margin-bottom:6px"></div>
     <div class="row"><label class="chip ${m.home !== false && m.name ? "on" : ""}"><input type="checkbox" data-f="home" ${m.home !== false ? "checked" : ""} hidden>Home med</label><label class="chip"><input type="checkbox" data-f="prn" ${m.prn ? "checked" : ""}> PRN</label><span class="sp"></span><button class="btn sm warn" data-rmp>Remove</button></div></div>`; };
   $("#main").innerHTML = `<div class="row" style="margin-bottom:10px"><h1>${pt ? "Edit H&amp;P" : "New H&amp;P"}</h1><span class="sp"></span><a class="btn" href="${pt ? "#pt-" + pt.id : "#home"}" style="text-decoration:none">Cancel</a><button class="btn p" id="hSave">Save H&amp;P</button></div>
     <div class="card" style="padding:16px">
@@ -907,9 +1007,14 @@ function hpForm(id) {
       <div class="grid2">${[["bp", "BP"], ["hr", "Pulse"], ["rr", "Resp"], ["temp", "Temp"], ["o2", "O2 %"], ["ht", "Height (in)"], ["wt", "Weight (lb)"]].map(([k, n]) => `<div class="f"><span>${n}</span><input data-v="${k}" value="${esc(v[k] || "")}"></div>`).join("")}</div>
       <div class="f"><span>Labs (blank = All Labs Pending)</span><input id="hLab" value="${esc(pt?.labs?.[0]?.text || "")}"></div>
     </div>`;
+  S.formDirty = false; $("#main").addEventListener("input", () => { if (location.hash.startsWith("#hp-")) S.formDirty = true; });
   const adol = () => { const a = parseInt($("#hAge").value); $("#hAdol").textContent = a && a < 18 ? "Under 18: uses the adolescent GU/rectal line." : ""; };
   $("#hAge").oninput = adol; adol();
-  const wireRows = () => $$(".hpP").forEach(r => { $("[data-rmp]", r).onclick = () => r.remove(); $$("label.chip", r).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked))); });
+  const wireRows = () => $$(".hpP").forEach(r => {
+    const nm = $('[data-f="mname"]', r), sg = $(".hpSug", r);
+    const show = () => { const o = findMed(nm.value); sg.innerHTML = o ? `<span class="muted">Common:</span>` + o.map((x, i) => `<span class="chip sug" data-i="${i}">${esc([x.dose, x.route, x.freq, x.prn ? "PRN" : ""].filter(Boolean).join(" "))}</span>`).join("") : "";
+      $$(".sug", sg).forEach(c => c.onclick = () => { const x = o[+c.dataset.i]; $('[data-f="mdose"]', r).value = [x.dose, x.route, x.freq].join(" "); $('[data-f="prn"]', r).checked = x.prn; S.formDirty = true; }); };
+    nm.oninput = show; show(); $("[data-rmp]", r).onclick = () => r.remove(); $$("label.chip", r).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked))); });
   wireRows();
   $("#hAddP").onclick = () => { $("#hProbs").insertAdjacentHTML("beforeend", probRow()); wireRows(); };
   $("#hSave").onclick = e => busy(e.currentTarget, async () => {
@@ -935,7 +1040,7 @@ function hpForm(id) {
     if (!rec.times[admit]) E.assignTimes([rec], admit, rec.id + admit);
     if (!pt) S.pts.push(rec);
     if (oldFile && oldFile !== `${rec.file} ADMIT.docx`) { try { await S.store.root.removeEntry(oldFile); } catch {} }
-    await saveNow(rec); toast(`Saved "${rec.file} ADMIT.docx" in the team folder`); location.hash = "pt-" + rec.id;
+    S.formDirty = false; await saveNow(rec); toast(`Saved "${rec.file} ADMIT.docx" in the team folder`); location.hash = "pt-" + rec.id;
   });
 }
 function editScribes() {
@@ -1067,7 +1172,9 @@ async function rulesPage() {
 }
 
 // ---------------- start ----------------
+function medDatalist() { if ($("#medList")) return; const d = document.createElement("datalist"); d.id = "medList"; d.innerHTML = MED_NAMES.map(n => `<option value="${esc(n)}">`).join(""); document.body.append(d); }
 async function boot() {
+  medDatalist();
   window.__rnStarted = true;
   applyTheme();
   const r = supported() ? await Store.restore() : {};
