@@ -58,8 +58,8 @@ function progress(title) {
 function showError(e) {
   modal("Something went wrong", `<p class="muted" style="font-size:14px">${esc(e?.message || e)}</p><p class="muted" style="margin-top:8px">Nothing was lost. Try again; if it keeps happening, raise a flag with what you clicked.</p>`, `<button class="btn p" data-x>OK</button>`);
 }
-const ask = (title, text, yes = "OK") => new Promise(res => {
-  const m = modal(title, `<p class="muted" style="font-size:14px">${text}</p>`, `<button class="btn" data-x>Cancel</button><button class="btn p" data-yes>${yes}</button>`);
+const ask = (title, text, yes = "OK", no = "Cancel") => new Promise(res => {
+  const m = modal(title, `<p class="muted" style="font-size:14px">${text}</p>`, `<button class="btn" data-x>${no}</button><button class="btn p" data-yes>${yes}</button>`);
   m.onclose = () => res(false); $("[data-yes]", m).onclick = () => { m.onclose = null; m.remove(); res(true); };
 });
 
@@ -79,8 +79,11 @@ async function loadRules() {
 const saveRules = () => S.store.setShared("rulebook.json", S.rules);
 function flagsFor(pt, date = S.today) {
   const done = pt.addressed?.[date] || [];
-  return E.flags(pt, date, rulebook()).filter(f => !done.includes(f.text));
+  const extra = pt.problems.filter(q => q.start <= date && !(q.resolved && q.resolved < date) && isDiabetes(q.name) && onInsulin(q) === undefined)
+    .map(q => ({ level: "amber", problemId: q.id, text: `Taking insulin? (${q.name})` }));
+  return [...E.flags(pt, date, rulebook()), ...extra].filter(f => !done.includes(f.text));
 }
+const popts = o => ({ providers: providerNames(), ...o });
 const loud = fs => fs.filter(f => f.level === "red" || f.level === "amber");
 const editedToday = (pt, p) => [...p.hpi, ...p.plan].some(e => e.date >= S.today && e.text !== e.auto);
 
@@ -97,13 +100,21 @@ function save(pt, { docx = true } = {}) {
     if (docx) queueDocx(pt);
   }), 600);
 }
-function saveNow(pt, { docx = true } = {}) {
+function saveNow(pt, { docx = true, why = "Edited note" } = {}) {
   clearTimeout(timers[pt.id]);
+  logEdit(pt, why);
   return enqueue(pt, async () => {
     pt.updated = Date.now();
     const r = await S.store.savePatient(pt); if (r === "conflict") return conflict(pt);
     if (docx) queueDocx(pt);
   });
+}
+// Light edit history: who, when, what. The supervisor sees it in Supervisor tools.
+function logEdit(pt, what) {
+  if (!what) return;
+  const by = S.user?.name || "Unknown", last = pt.log?.at(-1);
+  if (last && last.by === by && last.what === what && Date.now() - last.at < 120000) { last.at = Date.now(); return; }
+  (pt.log ||= []).push({ by, at: Date.now(), what }); if (pt.log.length > 300) pt.log.splice(0, pt.log.length - 300);
 }
 // Run jobs a few at a time (network drives are faster in parallel, but not unlimited).
 async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } })); }
@@ -149,7 +160,7 @@ async function writeDocx(pt) {
     await S.store.write(bdir, `${pt.unit} - ${name}`, await f.arrayBuffer());
     pt.backedUp = true; S.store.savePatient(pt, true);
   }
-  const blob = await toDocx(window.docx, blocksFor(pt, pt.status === "admit" ? pt.admitDate : lastDate(pt), {}));
+  const blob = await toDocx(window.docx, blocksFor(pt, pt.status === "admit" ? pt.admitDate : lastDate(pt), popts({})));
   await S.store.write(dir, name, blob);
 }
 
@@ -200,9 +211,11 @@ function toggleTray() {
     ${cur === "chameleon" ? `<button class="item" data-reroll>🦎 New colors</button>` : ""}
     <h4>Feedback</h4>
     <button class="item" data-flag>⚑ Raise a flag</button>
+    <button class="item" data-plant>📍 Plant a flag on something</button>
     <button class="item" data-hub>📋 Flag list</button>
-    ${S.store ? `<button class="item" data-rules>🛡 Rules (supervisor)</button>` : ""}
-    ${S.store ? `<h4>Team</h4><button class="item" data-scribes>✎ Scribe names</button>
+    ${S.store && S.user ? `<button class="item" data-rules>🛡 ${isSup() ? "Supervisor tools" : "Team rules"}</button>` : ""}
+    ${S.store ? `<h4>${S.user ? esc(S.user.name) : "Team"}</h4>
+    ${S.user && !S.store.demo ? `<button class="item" data-pin>🔑 Change my PIN</button><button class="item" data-out>↩ Sign out</button>` : ""}
     <button class="item" data-folder>📁 ${S.store.demo ? "Leave demo" : "Change team folder"}</button>` : ""}`;
   document.body.append(t);
   const close = () => { t.remove(); $("#gear")?.classList.remove("open"); };
@@ -211,8 +224,10 @@ function toggleTray() {
   $("[data-flag]", t).onclick = () => { close(); raiseFlag(); };
   $("[data-hub]", t).onclick = () => { close(); location.hash = "flags"; };
   $("[data-rules]", t)?.addEventListener("click", () => { close(); location.hash = "rules"; });
-  $("[data-scribes]", t)?.addEventListener("click", () => { close(); editScribes(); });
-  $("[data-folder]", t)?.addEventListener("click", async () => { close(); await Store.forget(); S.store = null; S.pts = []; location.hash = ""; boot(); });
+  $("[data-plant]", t).onclick = () => { close(); plantFlag(); };
+  $("[data-pin]", t)?.addEventListener("click", () => { close(); newPinModal(users().find(u => u.id === S.user.id), "Change my PIN"); });
+  $("[data-out]", t)?.addEventListener("click", () => { close(); signOut(); });
+  $("[data-folder]", t)?.addEventListener("click", async () => { close(); await Store.forget(); S.store = null; S.user = null; S.pts = []; location.hash = ""; boot(); });
   setTimeout(() => document.addEventListener("click", function off(e) { if (!t.contains(e.target) && e.target.id !== "gear" && !e.target.closest("#gear")) { close(); document.removeEventListener("click", off); } }), 0);
 }
 
@@ -222,6 +237,7 @@ function route() {
   const h = location.hash.slice(1), main = $("#main");
   main.style.animation = "none"; void main.offsetWidth; main.style.animation = "";
   if (!S.store) return welcome();
+  if (!S.user) { $("#top .tabs")?.remove(); return loginScreen(); }
   S.today = localToday(); S.date = S.viewDate || S.today;
   if (h.startsWith("unit-")) return unitView(h.slice(5));
   if (h.startsWith("pt-")) { const pt = findPt(h.slice(3)); if (pt) S.date = noteDate(pt); return ptView(h.slice(3)); }
@@ -289,68 +305,138 @@ async function load() {
     await pool(S.pts, 6, pt => S.store.savePatient(pt, true)); S.pts.forEach(queueDocx);
   }
   await loadRules();
-  S.settings = await S.store.getShared("settings.json", { scribes: [] });
+  S.settings = await S.store.getShared("settings.json", {});
+  if (!S.settings.users && S.settings.scribes?.length) { for (const n of S.settings.scribes) await addUser(n, "scribe"); }   // older setting
+  if (S.store.demo) S.user = { id: "demo", name: "Demo user", role: "supervisor" };
+  else { let id = null; try { id = sessionStorage.getItem("rn-user"); } catch {} const u = users().find(x => x.id === id); S.user = u ? { id: u.id, name: u.name, role: u.role } : null; }
+  S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []);
   if (!location.hash || location.hash === "#") location.hash = "home"; else route();
 }
 window.addEventListener("focus", async () => {        // pick up other computers' changes
   if (!S.store || S.open || $(".scrim")) return;
-  try { S.pts = await S.store.loadPatients(); route(); } catch {}
+  try { S.pts = await S.store.loadPatients(); S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []); route(); } catch {}
 });
 
 // ---------------- home dashboard ----------------
+const isDiabetes = n => /diabet|\bT[12]DM\b|\bDM ?[12]?\b|IDDM|NIDDM/i.test(n || "");
+const onInsulin = q => q.insulin ?? (q.meds.some(m => /insulin|lantus|humalog|novolog|glargine|lispro|basaglar|levemir|tresiba/i.test(m.name || "")) ? true : undefined);
+const a3 = p => p.always3 || autoA3(p, p.problems.filter(q => !(q.resolved && q.resolved < S.today)));
+const always3 = p => ["P", "OD"].includes(a3(p));
+const effBill = (p, d) => p.bill?.[d] ?? (always3(p) && (p.admitDate || d) <= d && (!p.dischargedOn || p.dischargedOn >= d) ? "3" : "");
+const fullMDY = d => `${md(d)}/${d.slice(0, 4)}`;
+let dayQ = Promise.resolve();
+function saveDay(patch) {                             // one at a time; re-read first since other computers write here too
+  S.days[S.today] = { ...(S.days[S.today] || {}), ...patch };
+  return dayQ = dayQ.then(async () => {
+    const disk = await S.store.getShared("days.json", {});
+    disk[S.today] = { ...(disk[S.today] || {}), ...patch }; S.days = disk; await S.store.setShared("days.json", disk);
+  }).catch(e => console.warn(e));
+}
+function buildCount(d = S.today) {
+  const day = S.days?.[d] || {}, n = {};
+  for (const p of S.pts) {
+    if (p.admitDate > d || (p.dischargedOn && p.dischargedOn < d)) continue;
+    const v = String(effBill(p, d)).trim(); if (!/^[123]$/.test(v)) continue;
+    const code = (p.admitDate === d ? "9922" : "9923") + v; n[code] = (n[code] || 0) + 1;
+  }
+  const c = k => `${k}: ${n[k] || 0}`;
+  return [day.provider || "(provider)", `${day.in || "____"} - ${day.out || "____"} ${fullMDY(d)}`, "",
+    ...(n["99231"] || true ? [c("99231")] : []), c("99232"), c("99233"), "", ...(n["99221"] ? [c("99221")] : []), c("99222"), c("99223"), "",
+    `EKG - 93010: ${day.ekg || 0}`].join("\n");
+}
+function countModal() {
+  const m = modal("🧾 Count for " + fullMDY(S.today), `<p class="muted" style="margin-bottom:8px">Check it over. You can fix anything right here before saving.</p>
+    <textarea id="cT" class="counttxt" rows="14">${esc(buildCount())}</textarea>`,
+    `<button class="btn" id="cCopy">Copy</button><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="cSave">Save count</button>`);
+  $("#cCopy", m).onclick = async () => { try { await navigator.clipboard.writeText($("#cT", m).value); toast("Copied"); } catch { $("#cT", m).select(); } };
+  $("#cSave", m).onclick = e => busy(e.currentTarget, async () => { await saveDay({ count: { text: $("#cT", m).value, by: S.user?.name, at: Date.now() } }); m.close(true); toast("Count saved"); home(); });
+}
+async function boardSave(fn) { S.board = await S.store.getShared("board.json", []); fn(S.board); await S.store.setShared("board.json", S.board); }
+function boardModal() {
+  const m = modal("📌 Note for the next provider", `<div class="f"><textarea id="bT" rows="5" placeholder="What happened, what to watch, what's still pending…"></textarea></div><p class="muted">Shows on Home for everyone until someone marks it done.</p>`,
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="bGo">Save note</button>`);
+  setTimeout(() => $("#bT", m)?.focus(), 50);
+  $("#bGo", m).onclick = async () => { const t = $("#bT", m).value.trim(); if (!t) return; await boardSave(b => b.push({ id: uid(), text: t, by: S.user?.name, date: S.today, at: Date.now() })); m.close(true); home(); };
+}
 function home() {
-  const live = S.pts.filter(active);
-  const admitsToday = S.pts.filter(p => p.admitDate === S.today).length;
-  const dcToday = S.pts.filter(p => p.dischargedOn === S.today).length;
-  const red = live.reduce((n, p) => n + flagsFor(p).filter(f => f.level === "red").length, 0);
-  const waiting = live.filter(p => p.status === "admit");
-  const tomorrow = E.addDays(S.today, 1);
-  const prepped = u => { const l = unitPts(u).filter(p => p.status !== "admit"); return l.length && l.every(p => p.problems.every(q => (q.resolved && q.resolved <= S.date) || q.hpi.some(e => e.date === tomorrow)) ); };
-  const day = new Date(S.today + "T12:00").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
-  $("#main").innerHTML = `
-    <div class="row"><h1>${day}</h1><span class="sp"></span>
-      <button class="btn" id="imp">Import notes</button><a class="btn p" href="#hp-new" style="text-decoration:none">+ New H&amp;P</a></div>
+  const live = S.pts.filter(active), tmw = E.addDays(S.today, 1), yest = E.addDays(S.today, -1);
+  const admits = S.pts.filter(p => p.admitDate === S.today && p.status !== "discharged");
+  const fu = live.reduce((n, p) => n + flagsFor(p).filter(f => f.level === "red").length, 0);
+  const day = S.days?.[S.today] || {};
+  const dayName = new Date(S.today + "T12:00").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const unitCard = u => {
+    const l = unitPts(u), notes = l.filter(p => p.status !== "admit"), adm = l.length - notes.length;
+    const pre = notes.filter(p => lastDate(p) > S.today), fs = l.flatMap(p => flagsFor(p));
+    const r = fs.filter(f => f.level === "red").length, a = fs.filter(f => f.level === "amber").length;
+    const qn = l.reduce((k, p) => k + (p.notes || []).filter(n => n.kind === "quick" && !n.done).length, 0);
+    const to = pre.length ? pre.map(lastDate).sort()[0] : null;
+    const status = !notes.length ? "No notes yet" : pre.length === notes.length ? `✓ Prepped for ${md(to)}` : pre.length ? `${pre.length} of ${notes.length} prepped for ${md(tmw)}` : `Prep for ${md(tmw)} not started`;
+    return `<a class="card unit2" href="#unit-${u}"><div class="u-top"><span class="u-name">${u}</span><span class="u-num">${l.length}</span></div>
+      <div class="u-sub">${l.length === 1 ? "patient" : "patients"}${adm ? ` · ${adm} new admit` : ""}</div>
+      <div class="u-bar"><i style="width:${notes.length ? Math.round(pre.length / notes.length * 100) : 0}%"></i></div>
+      <div class="u-foot ${pre.length === notes.length && notes.length ? "ok" : ""}">${status}</div>
+      <div class="u-flags">${r ? `<span><i class="d r"></i>${r} follow-up</span>` : ""}${a ? `<span><i class="d a"></i>${a} to check</span>` : ""}${qn ? `<span><i class="d q"></i>${qn} quick note${qn > 1 ? "s" : ""}</span>` : ""}${!r && !a && !qn ? `<span class="muted">All clear</span>` : ""}</div></a>`;
+  };
+  const dxCell = p => p.problems.filter(q => !(q.resolved && q.resolved < S.today)).map(q => {
+    const f = flagsFor(p).some(x => x.problemId === q.id && x.level === "red") || q.alwaysFlag || q.meds.some(m => m.end && m.end >= S.today);
+    return `<span class="${isDiabetes(q.name) ? "dxd" : f ? "dxa" : ""}">${esc(abbr(q.name))}</span>`; }).join(", ") || "None";
+  const notesCell = p => [...p.problems.filter(q => isDiabetes(q.name) && !(q.resolved && q.resolved < S.today)).map(q => { const i = onInsulin(q);
+      return i === true ? "Taking insulin" : i === false ? "No insulin" : `<span class="dxa">Insulin?</span>`; }),
+    ...(p.notes || []).filter(n => n.kind === "keep").map(n => esc(n.text))].join("; ");
+  $("#main").innerHTML = `<div class="homegrid"><div style="min-width:0">
+    <div class="row"><h1>${dayName}</h1><span class="sp"></span>
+      <button class="btn" id="imp">⤓ Import notes</button><a class="btn p" href="#hp-new" style="text-decoration:none">＋ New H&amp;P</a></div>
+    <div class="card daybar">
+      <label><span>Provider today</span><select id="dP"><option value="">Pick…</option>${providerNames().map(n => `<option ${day.provider === n ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>
+      <label><span>In</span><input id="dIn" value="${esc(day.in || "")}" placeholder="0800" maxlength="4" inputmode="numeric"></label>
+      <label><span>Out</span><input id="dOut" value="${esc(day.out || "")}" placeholder="1500" maxlength="4" inputmode="numeric"></label>
+      <label><span>EKGs reviewed</span><input id="dE" value="${esc(day.ekg || "")}" placeholder="0" maxlength="3" inputmode="numeric"></label>
+      <button class="btn go" id="genC">🧾 Generate count</button>
+    </div>
     <div class="stats">
       <div class="card stat"><b>${live.length}</b><span>In the hospital</span></div>
-      <div class="card stat"><b>${admitsToday}</b><span>Admits today</span></div>
-      <div class="card stat"><b>${dcToday}</b><span>Discharges today</span></div>
-      <div class="card stat ${red ? "r" : ""}"><b>${red}</b><span>Urgent flags</span></div>
+      <div class="card stat"><b>${admits.length}</b><span>Admits today</span>${admits.length ? `<div class="admits">${admits.map(p => `<a href="#pt-${p.id}">${esc(p.name)} <i>${p.unit}</i></a>`).join("")}</div>` : ""}</div>
+      <div class="card stat ${fu ? "r" : ""}"><b>${fu}</b><span>Follow-up flags</span></div>
     </div>
     <h2>Units</h2>
-    <div class="units">${UNITS.map(u => {
-      const l = unitPts(u), fs = l.flatMap(p => flagsFor(p)), r = fs.filter(f => f.level === "red").length, a = fs.filter(f => f.level === "amber").length;
-      return `<a class="card unit" href="#unit-${u}"><div class="row"><span class="nm">${u.toUpperCase()}</span><span class="sp"></span>
-        ${r ? `<span class="pill r">${r}</span>` : ""}${a ? `<span class="pill a">${a}</span>` : ""}${!r && !a ? `<span class="pill ok">clear</span>` : ""}</div>
-        <div class="ln">${l.length} patient${l.length === 1 ? "" : "s"}${l.some(p => p.status === "admit") ? ` · ${l.filter(p => p.status === "admit").length} admit` : ""}</div>
-        <div class="ln">${prepped(u) ? "✓ Prepped for " + md(tomorrow) : "Not prepped for " + md(tomorrow) + " yet"}</div></a>`;
-    }).join("")}</div>
-    <div class="row" style="margin:18px 0 8px"><h2 style="margin:0">All patients</h2><span class="sp"></span><button class="btn sm" id="ovAll">${S.ovAll ? "Collapse all" : "Expand all"}</button></div>
+    <div class="units2">${UNITS.map(unitCard).join("")}</div>
+    <div class="row" style="margin:20px 0 8px"><h2 style="margin:0">All patients</h2><span class="sp"></span><button class="btn sm" id="ovAll">${S.ovAll ? "Collapse all" : "Expand all"}</button></div>
     <div class="card" id="ov">${UNITS.map(u => {
       const l = unitPts(u), open = S.ovAll || S.expanded?.has(u);
       const nFlag = l.filter(p => loud(flagsFor(p)).length).length;
       return `<div class="ovu ${open ? "open" : ""}" data-u="${u}"><div class="ovh"><span class="ovn">${u.toUpperCase()}</span>
         <span class="muted">${l.length} patient${l.length === 1 ? "" : "s"}${nFlag ? ` · ${nFlag} with pertinent issues` : ""}</span><span class="sp"></span><span class="chev">▸</span></div>
-        <div class="ovb">${l.length ? `<table class="ovt xl"><tr><th></th><th>Patient Name</th><th>Pertinent Issues</th><th>Medical Diagnoses</th><th>Psychiatric Diagnosis</th><th>Insulin?</th><th>Billing</th><th>Always 3?</th></tr>
-          ${l.map((p, i) => { const live = p.problems.filter(q => !(q.resolved && q.resolved < S.today));
-            const f = loud(flagsFor(p)).map(x => x.text);
-            const ins = live.some(q => q.meds.some(m => /insulin|lantus|humalog|novolog|glargine|lispro/i.test(m.name)) || /insulin/i.test([...q.plan, ...q.hpi].map(e => e.text).join(" ")));
-            return `<tr data-pt="${p.id}"><td class="muted">${i + 1}</td><td class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}</td>
-              <td>${esc([...f, ...(p.notes || []).filter(n => n.kind === "keep").map(n => n.text)].join("; "))}</td>
-              <td>${live.map(q => esc(abbr(q.name))).join(", ") || "None"}</td><td>${esc(p.psych?.dx || "")}</td><td>${ins ? "Y" : ""}</td>
-              <td><input class="cell" data-bill value="${esc(p.billing || "")}" maxlength="3"></td>
-              <td><select class="cell" data-a3>${["~", "P", "M", "OD"].map(o => `<option ${(p.always3 || autoA3(p, live)) === o ? "selected" : ""}>${o}</option>`).join("")}</select></td></tr>`; }).join("")}</table>` : `<p class="muted" style="padding:10px">No patients.</p>`}</div></div>`;
+        <div class="ovb">${l.length ? `<table class="ovt xl zebra"><tr><th></th><th>Patient</th><th>Pertinent issues</th><th>Medical diagnoses</th><th>Psychiatric diagnosis</th><th>Notes</th><th title="Billing level yesterday">Yest.</th><th title="Billing level today">Today</th><th>Always 3?</th></tr>
+          ${l.map((p, i) => { const names = p.problems.map(q => q.name), f = loud(flagsFor(p)).map(x => x.text).filter(t => !/^Taking insulin\?/.test(t) && !names.includes(t));
+            const qn = (p.notes || []).some(n => n.kind === "quick" && !n.done);
+            return `<tr data-pt="${p.id}"><td class="muted">${i + 1}</td><td class="nm"><b>${esc(p.name)}</b>${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}${qn ? `<i class="d q" title="Quick note to write up"></i>` : ""}</td>
+              <td>${esc(f.join("; "))}</td><td>${dxCell(p)}</td><td>${esc(p.psych?.dx || "")}</td><td>${notesCell(p)}</td>
+              <td class="muted" style="text-align:center">${esc(effBill(p, yest)) || "—"}</td>
+              <td><input class="cell" data-bill value="${esc(p.bill?.[S.today] ?? "")}" placeholder="${always3(p) ? "3" : ""}" maxlength="1" inputmode="numeric"></td>
+              <td><select class="cell" data-a3>${["~", "P", "M", "OD"].map(o => `<option ${a3(p) === o ? "selected" : ""}>${o}</option>`).join("")}</select></td></tr>`; }).join("")}</table>` : `<p class="muted" style="padding:10px">No patients.</p>`}</div></div>`;
     }).join("")}</div>
-    <p class="muted" style="margin-top:6px">Always 3?: P always level 3 · ~ level 3 on admit, then mental status · M pertinent medical issue · OD overdose. Billing and Always 3 save as you change them.</p>
-    ${waiting.length ? `<h2>New admits (H&amp;P)</h2><div class="card list">${waiting.map(p => `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}<span class="tag">ADMIT</span></span><span class="mk q">${p.unit} · admitted ${md(p.admitDate)}</span></a>`).join("")}</div>` : ""}
-    ${S.store.demo ? `<p class="warnbox">Demo mode: every patient here is fake, and nothing touches the U: drive.</p>` : ""}`;
+    <p class="muted" style="margin-top:6px">Always 3?: P always level 3 · ~ level 3 on admit, then mental status · M pertinent medical issue · OD overdose. A light 3 means it counts as 3 unless you type another number. Everything here saves as you change it.</p>
+    ${S.store.demo ? `<p class="warnbox">Demo mode: every patient here is fake, and nothing touches the U: drive.</p>` : ""}
+  </div>
+  <aside class="rail">
+    ${day.count ? `<div class="sticky count"><div class="sh"><b>🧾 Today's count</b><span class="sp"></span><button class="btn sm" id="reC">Redo</button></div><pre>${esc(day.count.text)}</pre><div class="muted" style="font-size:11px">saved by ${esc(day.count.by || "")}</div></div>` : ""}
+    <div class="row" style="margin:2px 0 8px"><b style="font-size:14px">📌 For the next provider</b><span class="sp"></span><button class="btn sm" id="bAdd">＋ Note</button></div>
+    ${(S.board || []).slice().reverse().map((n, i) => `<div class="sticky board c${i % 3}"><div>${esc(n.text).replace(/\n/g, "<br>")}</div>
+      <div class="sh" style="margin:6px 0 0"><span class="muted">${esc(n.by || "")} · ${md(n.date)}</span><span class="sp"></span><button class="btn sm" data-bd="${n.id}">✓ Done</button></div></div>`).join("") || `<p class="muted" style="font-size:12.5px">Notes left here show for whoever rounds next.</p>`}
+  </aside></div>`;
   $("#imp").onclick = e => busy(e.currentTarget, importNotes);
+  const dayField = (id, key, clean = v => v.trim()) => $(id).onchange = async e => { await saveDay({ [key]: clean(e.target.value) }); toast("Saved"); };
+  dayField("#dP", "provider"); dayField("#dIn", "in", v => v.replace(/\D/g, "").padStart(4, "0").slice(-4)); dayField("#dOut", "out", v => v.replace(/\D/g, "").padStart(4, "0").slice(-4)); dayField("#dE", "ekg", v => v.replace(/\D/g, ""));
+  $("#genC").onclick = countModal; $("#reC")?.addEventListener("click", countModal);
+  $("#bAdd").onclick = boardModal;
+  $$("[data-bd]").forEach(b => b.onclick = async () => { await boardSave(list => { const i = list.findIndex(x => x.id === b.dataset.bd); if (i >= 0) list.splice(i, 1); }); home(); });
   $$(".ovh").forEach(h => h.onclick = () => { const u = h.parentElement.dataset.u; (S.expanded ||= new Set()).has(u) ? S.expanded.delete(u) : S.expanded.add(u); h.parentElement.classList.toggle("open"); });
   $("#ovAll").onclick = () => { S.ovAll = !S.ovAll; if (!S.ovAll) S.expanded = new Set(); home(); };
   $$("tr[data-pt]").forEach(tr => {
     const pt = findPt(tr.dataset.pt);
     tr.onclick = e => { if (!e.target.closest(".cell")) location.hash = "pt-" + pt.id; };
-    $("[data-bill]", tr).onchange = e => { pt.billing = e.target.value.trim(); saveNow(pt, { docx: false }); toast("Saved"); };
-    $("[data-a3]", tr).onchange = e => { pt.always3 = e.target.value; saveNow(pt, { docx: false }); toast("Saved"); };
+    $("[data-bill]", tr).onchange = e => { const v = e.target.value.trim(); pt.bill ||= {}; if (v) pt.bill[S.today] = v; else delete pt.bill[S.today]; saveNow(pt, { docx: false, why: `Billing ${v || "cleared"}` }); toast("Saved"); };
+    $("[data-a3]", tr).onchange = e => { pt.always3 = e.target.value; saveNow(pt, { docx: false, why: `Always 3: ${e.target.value}` }); toast("Saved"); home(); };
   });
 }
 
@@ -441,14 +527,14 @@ function unitView(u) {
     && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.today)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
-      <button class="btn" id="qn">+ Quick note</button><button class="btn" id="vit">Vitals</button><button class="btn" id="prn">Print unit</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
+      <button class="btn" id="qn">📝 Quick note</button><button class="btn" id="vit">🩺 Vitals</button><button class="btn" id="prn">🖨 Print unit</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
     ${preppedCount ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">${preppedCount} of ${l.length} notes prepped for ${md(tmw)}.<span class="sp"></span><button class="btn sm" id="unprepU">Unprep ${u}</button></div>` : ""}
     <div class="row" style="margin:-4px 0 10px"><span class="sp"></span><button class="btn sm" id="reimp" title="Start this unit over from the original Word files">Start ${u} over from the original files</button></div>
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
       const fs = loud(flagsFor(p)); const top = fs.find(f => f.level === "red") || fs[0];
       const qn = (p.notes || []).filter(n => n.kind === "quick" && !n.done).length;
-      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}${qn ? `<span class="tag note">📝 ${qn}</span>` : ""}</span>
+      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}${qn ? `<span class="tag note"><i class="d q"></i>${qn} quick note${qn > 1 ? "s" : ""}</span>` : ""}</span>
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
     }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>`;
   $("#reimp").onclick = e => busy(e.currentTarget, () => restartUnit(u));
@@ -513,7 +599,8 @@ function ptView(id) {
   const alerts = loud(fs).filter(f => !f.problemId || !f.text.startsWith("Uncommon") || true);
   $("#main").innerHTML = `<div class="ptwrap">
     <nav class="side">${sideList.map(p => { const c = loud(flagsFor(p)); const r = c.filter(f => f.level === "red").length;
-      return `<a href="#pt-${p.id}" class="${p.id === id ? "on" : ""}"><span>${esc(p.name)}</span>${p.status === "admit" ? `<small class="ok">ADMIT</small>` : c.length ? `<span class="pill ${r ? "r" : "a"}">${c.length}</span>` : `<small class="ok">ready</small>`}</a>`; }).join("")}</nav>
+      const qn = (p.notes || []).some(n => n.kind === "quick" && !n.done);
+      return `<a href="#pt-${p.id}" class="${p.id === id ? "on" : ""}"><span>${esc(p.name)}${qn ? ` <i class="d q" title="Quick note to write up"></i>` : ""}</span>${p.status === "admit" ? `<small class="ok">ADMIT</small>` : c.length ? `<span class="pill ${r ? "r" : "a"}">${c.length}</span>` : `<small class="ok">ready</small>`}</a>`; }).join("")}</nav>
     <div style="min-width:0">
       <div class="alerts">${alerts.map(f => `<div class="al ${f.level}"><span>${esc(f.text)}</span><span class="sp"></span>
         ${f.text.startsWith("Uncommon: ") ? `<button class="btn sm" data-routine="${esc(f.text.slice(10))}">Mark routine</button><button class="btn sm" data-always="${esc(f.text.slice(10))}">Always flag</button>` : ""}
@@ -521,11 +608,14 @@ function ptView(id) {
       ${S.viewDate ? `<div class="al amber" style="margin-bottom:10px">Old version: how this note read on ${md(S.viewDate)}. Read only.<span class="sp"></span><button class="btn sm" id="rpOld">Print this version</button><button class="btn sm" id="backNow">Back to current</button></div>`
         : lastDate(pt) > S.today ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Prepped for ${md(lastDate(pt))}.<span class="sp"></span><button class="btn sm" id="unprepP">Unprep</button></div>` : ""}
       <div class="tools" ${S.viewDate ? "hidden" : ""}>
-        <button class="btn sm" id="addP">+ Problem</button><button class="btn sm" id="vit1">Vitals</button><button class="btn sm" id="labs">Labs</button>
-        <button class="btn sm" id="psy">Psych line</button><button class="btn sm" id="info">Patient info</button>
-        ${pt.status === "admit" ? `<a class="btn sm" href="#hp-${pt.id}" style="text-decoration:none">Edit H&amp;P</a>` : ""}
-        <span class="sp"></span><button class="btn sm" id="reprint">Print</button>
-        <button class="btn sm warn" id="dc">Discharge</button></div>
+        <button class="btn go big" id="addP">＋ Add diagnosis</button>
+        <button class="btn ic" id="vit1" title="Vitals">🩺<span>Vitals</span></button><button class="btn ic" id="labs" title="Labs">🧪<span>Labs</span></button>
+        <button class="btn ic" id="stk" title="Sticky note">📝<span>Sticky note</span></button><button class="btn ic" id="reprint" title="Print">🖨<span>Print</span></button>
+        <span class="sp"></span><div class="more"><button class="btn ic" id="moreB" title="More">⋯<span>More</span></button>
+          <div class="menu" id="moreM" hidden>
+            <button data-m="info">👤 Patient info &amp; history blurb</button><button data-m="psy">🧠 Psych / primary diagnosis line</button>
+            ${pt.status === "admit" ? `<button data-m="hp">📄 Edit H&amp;P form</button>` : ""}
+            <button data-m="hist">🕑 Who edited this note</button><button data-m="dc" class="warn">🚪 Discharge</button></div></div></div>
       ${stickyPanel(pt)}
       <div class="paper" id="paper">
         <div class="hdr"><span>${esc(pt.name)}</span><span>DOB ${esc(pt.dob || "—")} · MRN ${esc(pt.mrn || "—")}</span><span>Unit: ${pt.unit}</span><span>${md(date)}/${date.slice(0, 4)}</span></div>
@@ -564,15 +654,19 @@ function ptView(id) {
   $('[data-edit="labs"]')?.addEventListener("click", () => labsModal(pt));
   $('[data-edit="psych"]')?.addEventListener("click", () => psychModal(pt));
   $("#addP").onclick = () => addProblem(pt);
+  $("#stk").onclick = () => stickyModal([pt]);
+  $("#moreB").onclick = e => { e.stopPropagation(); const m = $("#moreM"); m.hidden = !m.hidden; if (!m.hidden) setTimeout(() => document.addEventListener("click", () => { m.hidden = true; }, { once: true })); };
+  $$("[data-m]").forEach(b => b.onclick = () => { const k = b.dataset.m;
+    if (k === "info") infoModal(pt); if (k === "psy") psychModal(pt); if (k === "hp") location.hash = "hp-" + pt.id; if (k === "dc") discharge(pt);
+    if (k === "hist") modal("Who edited this note", `<table class="ovt zebra"><tr><th>When</th><th>Who</th><th>What</th></tr>${(pt.log || []).slice().reverse().slice(0, 60).map(l => `<tr><td>${new Date(l.at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td><b>${esc(l.by)}</b></td><td>${esc(l.what)}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">No edits recorded yet.</td></tr>`}</table>`); });
   $("#vit1").onclick = () => vitalsModal(pt.unit, pt.id);
   $("#labs").onclick = () => labsModal(pt);
-  $("#psy").onclick = () => psychModal(pt);
-  $("#info").onclick = () => infoModal(pt);
+
   $("#reprint").onclick = () => reprintModal(pt);
-  $("#dc").onclick = () => discharge(pt);
+
   $("#unprepP")?.addEventListener("click", e => busy(e.currentTarget, async () => { if (await ask("Unprep this note?", `Removes what was added for ${md(lastDate(pt))} so it goes back to today (${md(S.today)}).`, "Unprep")) { await unprep(pt); route(); } }));
   $("#backNow")?.addEventListener("click", () => { S.viewDate = null; route(); });
-  $("#rpOld")?.addEventListener("click", () => printPdf([blocksFor(pt, S.viewDate, { provider: S.provider })], `${pt.file} ${md(S.viewDate).replace("/", "-")}.pdf`));
+  $("#rpOld")?.addEventListener("click", () => printPdf([blocksFor(pt, S.viewDate, popts({ provider: S.provider }))], `${pt.file} ${md(S.viewDate).replace("/", "-")}.pdf`));
   if (S.open) openEditor(pt, S.open);
 }
 async function address(pt, text) {
@@ -609,8 +703,8 @@ function stickyModal(pts, preselect) {
   $("#sGo", m).onclick = async () => {
     const text = $("#sT", m).value.trim(); if (!text) return;
     const pt = pts.length > 1 ? findPt($("#sP", m).value) : pts[0];
-    (pt.notes ||= []).push({ id: uid(), kind, text, date: S.today }); m.close(true);
-    await saveNow(pt, { docx: false }); toast("Note saved"); route();
+    (pt.notes ||= []).push({ id: uid(), kind, text, date: S.today, by: S.user?.name }); m.close(true);
+    await saveNow(pt, { docx: false, why: kind === "quick" ? "Added quick note" : "Added sticky note" }); toast("Note saved"); route();
   };
 }
 function wireSticky(pt) {
@@ -630,7 +724,7 @@ async function unprep(pt) {
     } catch (e) { console.warn(e); }
     pt.status = "admit"; pt.type = "admit"; delete pt.convertedOn;
   }
-  await saveNow(pt);
+  await saveNow(pt, { why: "Unprepped" });
 }
 function oldNotesModal() {
   const m = modal("Old notes", `<div class="f"><span>Show notes as they read on</span><input type="date" id="oD" value="${E.addDays(S.today, -1)}" max="${S.today}"></div>
@@ -710,6 +804,7 @@ function openEditor(pt, pid) {
     <button class="btn sm" id="eAdd" style="margin-top:6px">+ Add medication</button>
     <label>Options</label>
     <div class="row">
+      ${isDiabetes(p.name) ? `<span class="muted">Taking insulin?</span><span class="chip ${onInsulin(p) === true ? "on" : ""}" data-o="insY">Yes</span><span class="chip ${onInsulin(p) === false ? "on" : ""}" data-o="insN">No</span><span class="muted">·</span>` : ""}
       <span class="chip ${p.alwaysFlag ? "on" : ""}" data-o="alwaysFlag">Always flag</span>
       <span class="chip ${p.pcp ? "on" : ""}" data-o="pcp">PCP follow-up</span>
       <span class="chip ${p.peLine ? "on" : ""}" data-o="pe">Affects exam</span>
@@ -767,14 +862,24 @@ function openEditor(pt, pid) {
     const o = c.dataset.o;
     if (o === "alwaysFlag") p.alwaysFlag = !p.alwaysFlag;
     if (o === "pcp") p.pcp = !p.pcp;
+    if (o === "insY") p.insulin = true;
+    if (o === "insN") p.insulin = false;
     if (o === "pe") { if (p.peLine) delete p.peLine; else p.peLine = { key: "SKIN", text: "" }; }
     if (o === "resolve") p.resolved = p.resolved === S.date ? undefined : S.date;
     changed(); openEditor(pt, pid);
   });
   $("#ePeK", ed).onchange = e => { p.peLine.key = e.target.value; changed(); };
   $("#ePeT", ed).oninput = e => { p.peLine.text = e.target.value; changed(); };
-  $("#eDel", ed).onclick = async () => { if (await ask("Delete problem?", `Remove <b>${esc(p.name)}</b> and all its entries from this note? Use Resolve instead if it got better.`, "Delete")) { pt.problems = pt.problems.filter(q => q !== p); S.open = null; S.snap = null; await saveNow(pt); route(); } };
-  $("#eDone", ed).onclick = e => busy(e.currentTarget, async () => { S.open = null; S.snap = null; await saveNow(pt); toast("Saved"); route(); });
+  $("#eDel", ed).onclick = async () => { if (await ask("Delete problem?", `Remove <b>${esc(p.name)}</b> and all its entries from this note? Use Resolve instead if it got better.`, "Delete")) { pt.problems = pt.problems.filter(q => q !== p); S.open = null; S.snap = null; await saveNow(pt, { why: `Deleted ${p.name}` }); route(); } };
+  $("#eDone", ed).onclick = e => busy(e.currentTarget, async () => {
+    const missing = [];
+    if (!p.name.trim()) missing.push("the diagnosis name");
+    if (isDiabetes(p.name) && onInsulin(p) === undefined) missing.push("whether they take insulin");
+    p.meds.filter(m => !m.name?.trim()).length && missing.push("a medication name");
+    p.meds.filter(m => m.name?.trim() && !m.dose && m.start === S.today).forEach(m => missing.push(`the dose for ${m.name}`));
+    if (missing.length && !(await ask("Some info is missing", `Still blank: <b>${missing.map(esc).join(", ")}</b>.`, "Save without it", "Go back and fill it in"))) return;
+    p.meds = p.meds.filter(m => m.name?.trim());
+    S.open = null; S.snap = null; await saveNow(pt, { why: `Edited ${p.name}` }); toast("Saved"); route(); });
   $("#eCancel", ed).onclick = () => { discard(); route(); };
   $("#eTeach", ed).onclick = () => teachModal(pt, p, hE, pE);
 }
@@ -790,7 +895,7 @@ function addProblem(pt) {
     const tr = rulebook()[name] || {};
     const p = { id: uid(), name, symptom: $("#nS", m).value.trim() || name.toLowerCase(), autoVital: tr.autoVital, start: S.date, hpiOpen: null, planOpen: "Will continue to monitor", meds: [],
       hpi: [{ date: S.date, text: $("#nH", m).value.trim(), auto: "" }], plan: [] };
-    pt.problems.push(p); m.close(); await saveNow(pt); S.open = p.id; route();
+    pt.problems.push(p); m.close(); await saveNow(pt, { why: `Added ${name}` }); S.open = p.id; route();
   };
 }
 
@@ -808,7 +913,7 @@ function infoModal(pt) {
     if (pt.status !== "admit" && (newUnit !== oldUnit)) {           // transfer: move the Word file to the new unit folder
       try { await S.store.move(await S.store.unitDir(oldUnit, true), `${oldFile}.docx`, await S.store.unitDir(newUnit, true)); } catch {}
     }
-    pt.unit = newUnit; m.close(); await saveNow(pt); route();
+    pt.unit = newUnit; m.close(); await saveNow(pt, { why: oldUnit !== newUnit ? `Moved to ${newUnit}` : "Edited patient info" }); route();
   };
 }
 function psychModal(pt) {
@@ -816,7 +921,7 @@ function psychModal(pt) {
   const m = modal("Primary diagnosis line", `<div class="f"><span>Primary (psych) diagnosis from HCS</span><textarea id="yD" rows="2">${esc(ps.dx)}</textarea></div>
     <div class="f"><span>Taper line (only if psychiatry started one)</span><select id="yT">${[["none", "None"], ["ciwa", "CIWA / Valium"], ["cows", "COWS / Subutex"], ["both", "CIWA and COWS"]].map(([k, n]) => `<option value="${k}" ${ps.taper === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="yGo">Save</button>`);
-  $("#yGo", m).onclick = async () => { ps.dx = $("#yD", m).value.trim(); ps.taper = $("#yT", m).value; m.close(); await saveNow(pt); route(); };
+  $("#yGo", m).onclick = async () => { ps.dx = $("#yD", m).value.trim(); ps.taper = $("#yT", m).value; m.close(); await saveNow(pt, { why: "Edited psych line" }); route(); };
 }
 function labsModal(pt) {
   pt.labs ||= []; pt.pendingLabs ||= [];
@@ -833,23 +938,23 @@ function labsModal(pt) {
     const t = $("#lT", m).value.trim();
     if (t) pt.labs.push({ date: S.today, text: t, bullets: $("#lB", m).value.split("\n").map(s => s.trim()).filter(Boolean) });
     pt.pendingLabs = $("#lP", m).value.split("\n").map(s => s.trim()).filter(Boolean);
-    m.close(); await saveNow(pt); route();
+    m.close(); await saveNow(pt, { why: "Edited labs" }); route();
   };
 }
 function reprintModal(pt) {
   const m = modal("Print or reprint", `<div class="f"><span>Print the note as it was on</span><input type="date" id="rD" value="${S.today}" max="${lastDate(pt)}"></div>
-    <div class="f"><span>Provider</span><select id="rP"><option value="">(none)</option>${PROVIDERS.map(p => `<option ${S.provider === p ? "selected" : ""}>${p}</option>`).join("")}</select></div>
+    <div class="f"><span>Provider</span><select id="rP"><option value="">(none)</option>${providerNames().map(p => `<option ${(S.provider || S.days?.[S.today]?.provider) === p ? "selected" : ""}>${p}</option>`).join("")}</select></div>
     <p class="muted">Anything added after that date is left off, so old days reprint exactly.</p>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="rGo">Print</button>`);
-  $("#rGo", m).onclick = () => { const d = $("#rD", m).value; S.provider = $("#rP", m).value; m.close(); printPdf([pt.status === "admit" ? blocksFor(pt, d, { provider: S.provider }) : progressBlocks(pt, d, { provider: S.provider })], `${pt.file} ${md(d).replace("/", "-")}.pdf`); };
+  $("#rGo", m).onclick = () => { const d = $("#rD", m).value; S.provider = $("#rP", m).value; m.close(); printPdf([pt.status === "admit" ? blocksFor(pt, d, popts({ provider: S.provider })) : progressBlocks(pt, d, popts({ provider: S.provider }))], `${pt.file} ${md(d).replace("/", "-")}.pdf`); };
 }
 async function discharge(pt) {
   const m = modal(`Discharge ${esc(pt.name)}`, `<p class="muted" style="font-size:14px">Moves the note into ${pt.unit}'s discharge folder and takes them off the list.</p>
     <label class="chk"><input type="checkbox" id="dSeen"><div>We saw them today<small>Print today's note before moving it</small></div></label>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="dGo">Discharge</button>`);
   $("#dGo", m).onclick = e => busy(e.currentTarget, async () => {
-    if ($("#dSeen", m).checked) await printPdf([progressBlocks(pt, S.today, { provider: S.provider })], `${pt.file}.pdf`);
-    await saveNow(pt); await queue[pt.id]; docxQ.delete(pt.id); await writeDocx(pt);
+    if ($("#dSeen", m).checked) await printPdf([progressBlocks(pt, S.today, popts({ provider: S.provider }))], `${pt.file}.pdf`);
+    await saveNow(pt, { why: "Discharged" }); await queue[pt.id]; docxQ.delete(pt.id); await writeDocx(pt);
     try {
       const { dir, name } = await docxTarget(pt);
       const to = pt.status === "admit" ? await S.store.subDir(await S.store.unitDir(pt.unit, true), "admit") : await S.store.subDir(dir, "discharge");
@@ -892,7 +997,7 @@ function vitalsModal(unit, focusId) {
       $$("input", tr).forEach(i => { if (i.value.trim()) v[i.dataset.k] = i.value.trim(); });
       (pt.vitals ||= {})[S.today] = v; E.fillVitals(pt, S.today);
       for (const p of pt.problems) if (p.autoVital) { const e = p.hpi.find(x => x.date === S.today); if (e && e.text === e.auto) e.text = e.auto = dHpi(pt, p, S.today); }
-      await saveNow(pt);
+      await saveNow(pt, { why: "Entered vitals" });
     }
     m.close(); toast("Vitals saved"); route();
   });
@@ -917,7 +1022,7 @@ async function prepUnit(u) {
     if (r.review.length) review.push({ pt, items: r.review }); else quiet++;
     toSave.push(pt);
   }
-  await pool(toSave, 6, async pt => { await saveNow(pt); pg.set(`Saved ${++i} of ${toSave.length}`, i / toSave.length); });
+  await pool(toSave, 6, async pt => { await saveNow(pt, { why: `Prepped for ${md(tomorrow)}` }); pg.set(`Saved ${++i} of ${toSave.length}`, i / toSave.length); });
   } finally { pg.close(); }
   const m = modal(`Prep ${u} for ${md(tomorrow)}`, `
     <div class="lbl">Copied forward quietly</div><p class="muted">${quiet} patient${quiet === 1 ? "" : "s"} with no changes today.</p>
@@ -947,10 +1052,10 @@ function printModal(list) {
   const items = list.flatMap(pt => loud(flagsFor(pt)).map(f => {
     const p = f.problemId && pt.problems.find(q => q.id === f.problemId);
     return { pt, f, auto: !!(p && editedToday(pt, p)) };
-  }));
+  })).concat(list.flatMap(pt => (pt.notes || []).filter(n => n.kind === "quick" && !n.done).map(n => ({ pt, f: { text: "Quick note not written up: " + n.text }, auto: false }))));
   const m = modal(`Print ${list[0].unit} · ${list.length} notes`, `
     <div class="lbl">Provider (prints on every note, not saved)</div>
-    <select id="pP" class="btn" style="width:100%;text-align:left"><option value="">(none)</option>${PROVIDERS.map(p => `<option ${S.provider === p ? "selected" : ""}>${p}</option>`).join("")}</select>
+    <select id="pP" class="btn" style="width:100%;text-align:left"><option value="">(none)</option>${providerNames().map(p => `<option ${(S.provider || S.days?.[S.today]?.provider) === p ? "selected" : ""}>${p}</option>`).join("")}</select>
     <div class="lbl">Before you print: open flags</div>
     ${items.length ? items.map((x, i) => `<label class="chk"><input type="checkbox" data-c="${i}" ${x.auto ? "checked" : ""}><div>${esc(x.pt.name)}: ${esc(x.f.text)}<small>${x.auto ? "Edited today, checked for you" : "Not addressed yet"}</small></div></label>`).join("") : `<p class="muted">No open flags. Nice.</p>`}
     <div class="lbl">Printer</div><p class="muted">You'll pick the printer in the next window. Edge remembers the last one.</p>`,
@@ -960,7 +1065,7 @@ function printModal(list) {
   $("#pGo", m).onclick = async () => {
     S.provider = $("#pP", m).value; m.close();
     list.forEach(queueDocx);
-    printPdf(list.map(pt => blocksFor(pt, S.today, { provider: S.provider })), `${list[0].unit} ${md(S.today).replace("/", "-")}.pdf`);
+    printPdf(list.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider }))), `${list[0].unit} ${md(S.today).replace("/", "-")}.pdf`);
   };
 }
 
@@ -969,7 +1074,7 @@ function hpForm(id) {
   const pt = id ? findPt(id) : null, h = pt?.hp || {};
   const v = pt?.vitals?.[pt.admitDate] || {};
   const probs = pt?.problems || [];
-  const scribes = S.settings.scribes || [];
+  const scribes = scribeNames();
   const probRow = (p = {}) => { const m = p.meds?.[0] || {}; return `<div class="card hpP" style="padding:10px;margin-bottom:8px;box-shadow:none">
     <div class="grid2"><div class="f"><span>Diagnosis</span><input data-f="name" value="${esc(p.name || "")}"></div><div class="f"><span>Symptom word</span><input data-f="symptom" value="${esc(p.symptom || "")}" placeholder="e.g. acid reflux"></div></div>
     <div class="f"><span>HPI (what they report / take at home)</span><input data-f="hpi" value="${esc(p.hpiOpen || "")}" placeholder="Patient reports taking Omeprazole 40mg BID PRN at home to manage acid reflux"></div>
@@ -997,7 +1102,7 @@ function hpForm(id) {
       <button class="btn sm" id="hAddP">+ Add diagnosis</button>
       <div class="grid2" style="margin-top:12px">
         <div class="f"><span>Allergies</span><input id="hAl" value="${esc(h.allergies || "NKA")}"></div>
-        <div class="f"><span>Scribe</span><select id="hScr"><option value="">—</option>${scribes.map(s => `<option ${h.scribe === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div>
+        <div class="f"><span>Scribe</span><select id="hScr"><option value="">—</option>${scribes.map(s => `<option ${(h.scribe || S.user?.name) === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div>
       </div>
       <div class="f"><span>Home medications (one per line)</span><textarea id="hMeds" rows="3">${esc((h.meds || []).join("\n"))}</textarea></div>
       <div class="f"><span>Past surgical history</span><input id="hSurg" value="${esc(h.surgical || "No surgical history.")}"></div>
@@ -1040,29 +1145,57 @@ function hpForm(id) {
     if (!rec.times[admit]) E.assignTimes([rec], admit, rec.id + admit);
     if (!pt) S.pts.push(rec);
     if (oldFile && oldFile !== `${rec.file} ADMIT.docx`) { try { await S.store.root.removeEntry(oldFile); } catch {} }
-    S.formDirty = false; await saveNow(rec); toast(`Saved "${rec.file} ADMIT.docx" in the team folder`); location.hash = "pt-" + rec.id;
+    S.formDirty = false; await saveNow(rec, { why: pt ? "Edited H&P" : "Created H&P" }); toast(`Saved "${rec.file} ADMIT.docx" in the team folder`); location.hash = "pt-" + rec.id;
   });
-}
-function editScribes() {
-  const m = modal("Scribe names", `<div class="f"><span>One name per line (shows in the H&amp;P scribe dropdown)</span><textarea id="sc" rows="6">${esc((S.settings.scribes || []).join("\n"))}</textarea></div>`,
-    `<button class="btn" data-x>Cancel</button><button class="btn p" id="scGo">Save</button>`);
-  $("#scGo", m).onclick = async () => { S.settings.scribes = $("#sc", m).value.split("\n").map(s => s.trim()).filter(Boolean); await S.store.setShared("settings.json", S.settings); m.close(); toast("Saved"); };
 }
 
 // ---------------- flags (this project's own hub, saved in the team folder) ----------------
 async function getFlags() { return S.store ? S.store.getShared("feedback.json", []) : JSON.parse(ls.get("rn-flags") || "[]"); }
 async function setFlags(list) { return S.store ? S.store.setShared("feedback.json", list) : ls.set("rn-flags", JSON.stringify(list)); }
-function raiseFlag() {
-  const where = location.hash.startsWith("#pt-") ? "Patient note screen" : location.hash.slice(1) || "Home";
-  const m = modal("⚑ Raise a flag", `<div class="f"><span>What should change or what broke?</span><textarea id="fT" rows="4" placeholder="e.g. Prep should keep the antibiotic dates for UTIs too"></textarea></div>
+// What a tapped spot is, in words, without copying note text (so no patient info ends up in the flag).
+function describeSpot(el) {
+  const screen = location.hash.startsWith("#pt-") ? "Patient note" : location.hash.startsWith("#unit-") ? "Unit list" : location.hash.slice(1) || "Home";
+  if (!el) return screen;
+  const sec = el.closest("[data-prob]") ? (el.closest("[id^='p-']") ? "a plan paragraph" : "an HPI paragraph")
+    : el.closest(".ed") ? "the diagnosis editor" : el.closest(".sticky") ? "a sticky note" : el.closest(".al") ? "an alert banner"
+    : el.closest(".vs,[data-edit='vitals']") ? "the vitals table" : el.closest(".stats") ? "the summary numbers" : el.closest(".unit2") ? "a unit card"
+    : el.closest(".daybar") ? "the provider/time bar" : el.closest("#ov") ? "the all-patients table" : el.closest(".tools") ? "the note toolbar" : el.closest(".side") ? "the patient list" : null;
+  const lab = el.closest("button,label,th,h1,h2,.box,.lbl,.chip,.tabs a")?.textContent.trim().replace(/\s+/g, " ").slice(0, 50);
+  const isCtl = el.closest("button,.chip,.tabs a,label");
+  return `${screen}: ${isCtl && lab ? `“${lab}” button` : sec || (lab ? `“${lab}”` : el.tagName.toLowerCase())}`;
+}
+function plantFlag() {
+  const bar = document.createElement("div"); bar.className = "aimbar";
+  bar.innerHTML = `📍 Go to the screen, then tap the spot this flag is about.<span class="sp"></span><button class="btn sm" id="aimX">Cancel</button>`;
+  document.body.append(bar); document.body.classList.add("aiming");
+  const done = () => { bar.remove(); document.body.classList.remove("aiming"); document.removeEventListener("click", pick, true); };
+  const pick = e => {
+    if (bar.contains(e.target)) { if (e.target.id === "aimX") done(); return; }
+    if (e.target.closest(".tabs a, .back")) return;          // let them move between screens first
+    e.preventDefault(); e.stopPropagation(); done();
+    const el = e.target; el.classList.add("flagged"); setTimeout(() => el.classList.remove("flagged"), 1600);
+    raiseFlag(describeSpot(el));
+  };
+  setTimeout(() => document.addEventListener("click", pick, true), 0);
+}
+document.addEventListener("contextmenu", e => {
+  if (!S.store || e.target.closest("input,textarea,select,[contenteditable]") || e.shiftKey) return;
+  e.preventDefault(); const el = e.target; el.classList.add("flagged"); setTimeout(() => el.classList.remove("flagged"), 1600); raiseFlag(describeSpot(el));
+});
+function raiseFlag(spot) {
+  const where = spot || describeSpot(null);
+  const m = modal("⚑ Raise a flag", `<div class="lbl" style="margin-top:0">About</div><div class="row"><span class="chip on">📍 ${esc(where)}</span>${spot ? "" : `<button class="btn sm" id="fAim">Point at a spot instead</button>`}</div>
+    <div class="f" style="margin-top:10px"><span>What should change or what broke?</span><textarea id="fT" rows="4" placeholder="e.g. Prep should keep the antibiotic dates for UTIs too"></textarea></div>
     <div class="row">${["Bug", "Idea", "Wording"].map((k, i) => `<span class="chip ${i ? "" : "on"}" data-k="${k}">${k}</span>`).join("")}</div>
-    <p class="warnbox"><b>No patient info.</b> Describe the problem without names, MRNs, or anything that identifies a patient. Use fake details if you need an example.</p>`,
+    <p class="warnbox"><b>Leave out patient names and MRNs.</b> Flags get copied to Claude to fix, so describe the problem, not the patient. Tip: right-click anything to flag that exact spot.</p>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="fGo">Save flag</button>`);
+  $("#fAim", m)?.addEventListener("click", () => { m.close(true); plantFlag(); });
+  setTimeout(() => $("#fT", m)?.focus(), 50);
   let kind = "Bug"; $$("[data-k]", m).forEach(c => c.onclick = () => { kind = c.dataset.k; $$("[data-k]", m).forEach(x => x.classList.toggle("on", x === c)); });
   $("#fGo", m).onclick = async () => {
     const text = $("#fT", m).value.trim(); if (!text) return;
     if (/\b\d{5,}\b/.test(text) && !(await ask("Possible patient info", "That flag has a long number in it (like an MRN). Save anyway?", "Save anyway"))) return;
-    const list = await getFlags(); list.push({ id: uid(), kind, text, where, date: S.today, status: "open" }); await setFlags(list);
+    const list = await getFlags(); list.push({ id: uid(), kind, text, where, by: S.user?.name, date: S.today, status: "open" }); await setFlags(list);
     m.close(); toast("Flag saved to the team's flag list");
   };
 }
@@ -1083,7 +1216,59 @@ async function flagHub() {
 
 // ---------------- supervisor & team rules ----------------
 const sha = async t => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("rn:" + t)))].map(b => b.toString(16).padStart(2, "0")).join("");
-const isSup = () => { try { return !!S.settings.supPin && sessionStorage.getItem("rn-sup") === S.settings.supPin; } catch { return false; } };
+const isSup = () => !!S.store?.demo || S.user?.role === "supervisor";
+const users = () => S.settings.users || [];
+const providerNames = () => { const p = users().filter(u => u.role === "provider").map(u => u.name); return p.length ? p : PROVIDERS; };
+const scribeNames = () => users().filter(u => u.role !== "provider").map(u => u.name);
+const pinHash = (u, pin) => sha(u.id + ":" + pin);
+async function saveSettings() { await S.store.setShared("settings.json", S.settings); }
+async function addUser(name, role) {
+  const u = { id: uid(), name, role, mustReset: true }; u.pin = await pinHash(u, "1234");
+  (S.settings.users ||= []).push(u); await saveSettings(); return u;
+}
+async function setPin(u, pin) { u.pin = await pinHash(u, pin); u.mustReset = false; await saveSettings(); }
+function signIn(u) { S.user = { id: u.id, name: u.name, role: u.role }; try { sessionStorage.setItem("rn-user", u.id); } catch {} }
+function signOut() { S.user = null; try { sessionStorage.removeItem("rn-user"); } catch {} route(); }
+function newPinModal(u, title = "Choose your own PIN") {
+  return new Promise(res => {
+    const m = modal(title, `<p class="muted">You're signed in with the starting PIN. Pick a new one (4+ digits) that only you know.</p>
+      <div class="f"><span>New PIN</span><input id="n1" type="password" inputmode="numeric"></div><div class="f"><span>Type it again</span><input id="n2" type="password" inputmode="numeric"></div>`,
+      `<button class="btn p" id="nGo2">Save PIN</button>`);
+    setTimeout(() => $("#n1", m)?.focus(), 50);
+    $("#nGo2", m).onclick = async () => { const a = $("#n1", m).value, b = $("#n2", m).value;
+      if (a.length < 4) return toast("Use at least 4 digits"); if (a !== b) return toast("The two PINs don't match"); if (a === "1234") return toast("Pick something other than 1234");
+      await setPin(u, a); m.close(true); toast("PIN saved"); res(); };
+  });
+}
+function loginScreen() {
+  const list = users();
+  $("#main").innerHTML = `<div class="card welcome">
+    <img class="logo" src="icons/favicon.svg" alt=""><h1>${list.length ? "Sign in" : "Set up the supervisor"}</h1>
+    ${list.length ? `<div class="f" style="margin-top:12px"><span>Who are you?</span><select id="lU" class="btn" style="text-align:left">${list.slice().sort((a, b) => a.name.localeCompare(b.name)).map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>
+      <div class="f"><span>PIN</span><input id="lP" type="password" inputmode="numeric" autocomplete="off"></div>
+      <button class="btn p" id="lGo" style="width:100%;margin-top:6px">Sign in</button>
+      <p class="muted" style="margin-top:10px">New here? Your starting PIN is 1234. Forgot it? Ask the supervisor to reset it.</p>`
+    : `<p class="muted" style="margin:6px 0 12px">First time in this team folder. Make the supervisor account: they add everyone else and manage the rules.</p>
+      <div class="f"><span>Your name (as it should show)</span><input id="sN" placeholder="e.g. B. Olsen"></div>
+      <div class="f"><span>PIN (4+ digits)</span><input id="sP" type="password" inputmode="numeric"></div>
+      <button class="btn p" id="sGo" style="width:100%;margin-top:6px">Create supervisor</button>`}
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--paperLine)" class="row"><button class="btn sm" id="lDemo">Try the demo instead</button><span class="sp"></span><button class="btn sm" id="lFold">Change team folder</button></div></div>`;
+  const go = async () => {
+    const u = list.find(x => x.id === $("#lU").value);
+    if (await pinHash(u, $("#lP").value) !== u.pin) { toast("Wrong PIN"); $("#lP").select(); return; }
+    signIn(u); if (u.mustReset) await newPinModal(u);
+    location.hash = "home"; route();
+  };
+  $("#lGo")?.addEventListener("click", go);
+  $("#lP")?.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  setTimeout(() => $("#lP")?.focus(), 50);
+  $("#sGo")?.addEventListener("click", async () => {
+    const name = $("#sN").value.trim(), pin = $("#sP").value; if (!name) return toast("Add your name"); if (pin.length < 4) return toast("Use at least 4 digits");
+    const u = await addUser(name, "supervisor"); await setPin(u, pin); signIn(u); location.hash = "home"; route();
+  });
+  $("#lDemo").onclick = async () => { S.store = await Store.demoStore(); await load(); };
+  $("#lFold").onclick = async () => { await Store.forget(); S.store = null; S.pts = []; route(); };
+}
 async function suggest(item) {
   S.rules.pending ||= []; S.rules.pending.push({ id: uid(), date: S.today, ...item }); await saveRules();
   toast("Sent to the supervisor for approval");
@@ -1132,8 +1317,31 @@ async function rulesPage() {
   const pend = S.rules.pending || [];
   const desc = it => it.type === "wording" ? `Write “${esc(it.rule.replace)}” instead of “${esc(it.rule.find)}”${it.rule.dx ? ` (${esc(it.rule.dx)})` : " (all)"}`
     : `${esc(it.dx)}: ${esc(it.note || "")} ${it.change.status ? `“${esc(it.change.status)}”` : ""}`;
-  $("#main").innerHTML = `<div class="row" style="margin-bottom:10px"><h1>Team rules</h1><span class="sp"></span>
-      ${!S.settings.supPin ? `<button class="btn p" id="setPin">Set supervisor PIN</button>` : sup ? `<span class="pill ok">Supervisor unlocked</span><button class="btn sm" id="lock">Lock</button>` : `<button class="btn p" id="unlock">Supervisor unlock</button>`}</div>
+  const ROLE = { scribe: "Scribe", provider: "Provider", supervisor: "Supervisor" };
+  const edits = S.pts.flatMap(pt => (pt.log || []).map(l => ({ ...l, pt }))).sort((a, b) => b.at - a.at);
+  const who = S.supWho || ""; const shown = edits.filter(e => !who || e.by === who).slice(0, 80);
+  const counts = Object.entries(S.days || {}).filter(([, d]) => d.count).sort((a, b) => a[0] < b[0] ? 1 : -1);
+  $("#main").innerHTML = `<div class="row" style="margin-bottom:10px"><h1>${sup ? "Supervisor tools" : "Team rules"}</h1><span class="sp"></span>${sup ? `<span class="pill ok">${esc(S.user?.name || "")}</span>` : ""}</div>
+    ${sup ? `<div class="segtabs">${[["people", "👥 People"], ["edits", "🕑 Who edited what"], ["counts", "🧾 Daily counts"], ["rules", "📐 Rules"]].map(([k, n]) => `<button class="${(S.supTab || "people") === k ? "on" : ""}" data-tab="${k}">${n}</button>`).join("")}</div>` : ""}
+    <section data-sec="people" ${sup && (S.supTab || "people") === "people" ? "" : "hidden"}>
+      <p class="muted">Everyone signs in with their own PIN. New people start with PIN <b>1234</b> and are asked to change it the first time. Providers listed here are the names on the print and billing dropdowns, so type them the way they should print (e.g. "J. McGovern DNP").</p>
+      <div class="card" style="overflow:auto;margin-top:8px"><table class="ovt"><tr><th>Name</th><th>Role</th><th>PIN</th><th></th></tr>
+        ${users().slice().sort((a, b) => a.role.localeCompare(b.role) || a.name.localeCompare(b.name)).map(u => `<tr data-u="${u.id}"><td class="nm"><input class="cell wide" data-uname value="${esc(u.name)}"></td>
+          <td><select class="cell wide" data-urole>${Object.entries(ROLE).map(([k, n]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${n}</option>`).join("")}</select></td>
+          <td>${u.mustReset ? `<span class="muted">starting PIN (1234)</span>` : "set"}</td>
+          <td style="text-align:right"><button class="btn sm" data-reset>Reset PIN</button> ${u.id === S.user?.id ? "" : `<button class="btn sm warn" data-urm>Remove</button>`}</td></tr>`).join("")}</table></div>
+      <div class="row" style="margin-top:10px"><input id="nuN" class="btn" style="flex:1;min-width:160px;text-align:left" placeholder="New person's name"><select id="nuR" class="btn">${Object.entries(ROLE).map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select><button class="btn p" id="nuGo">+ Add person</button></div>
+    </section>
+    <section data-sec="edits" ${sup && S.supTab === "edits" ? "" : "hidden"}>
+      <div class="row"><p class="muted" style="flex:1">The last changes saved to each note, newest first. Use it to find who to help, not to grade anyone.</p>
+        <select id="wFil" class="btn sm"><option value="">Everyone</option>${[...new Set(edits.map(e => e.by))].map(n => `<option ${who === n ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+      <div class="card" style="overflow:auto;margin-top:8px"><table class="ovt zebra"><tr><th>When</th><th>Who</th><th>Patient</th><th>What</th></tr>
+        ${shown.map(e => `<tr onclick="location.hash='pt-${e.pt.id}'" style="cursor:pointer"><td>${new Date(e.at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td><b>${esc(e.by)}</b></td><td>${esc(e.pt.name)} <span class="muted">${e.pt.unit}</span></td><td>${esc(e.what)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">No edits yet.</td></tr>`}</table></div>
+    </section>
+    <section data-sec="counts" ${sup && S.supTab === "counts" ? "" : "hidden"}>
+      <div class="countgrid">${counts.map(([d, x]) => `<div class="sticky count"><div class="sh"><b>${md(d)}</b><span class="muted">saved by ${esc(x.count.by || "")}</span></div><pre>${esc(x.count.text)}</pre></div>`).join("") || `<p class="muted">No counts saved yet. Generate one from Home at the end of the day.</p>`}</div>
+    </section>
+    <section data-sec="rules" ${!sup || S.supTab === "rules" ? "" : "hidden"}>
     <p class="muted">These rules are saved in the team folder, so every computer uses the same ones. Only the supervisor can change them; everyone else can suggest changes (from here, or with 🎓 in a note).</p>
     ${pend.length ? `<h2>Waiting for approval (${pend.length})</h2><div class="card list">${pend.map(it => `<div class="it" style="cursor:default"><span class="nm" style="font-family:var(--sans);font-size:14px">${desc(it)}<br><small class="muted">suggested ${md(it.date)}</small></span>
       ${sup ? `<button class="btn sm go" data-ok="${it.id}">Approve</button><button class="btn sm" data-no="${it.id}">Decline</button>` : `<span class="muted">pending</span>`}</div>`).join("")}</div>` : ""}
@@ -1148,17 +1356,19 @@ async function rulesPage() {
           <td><select data-k="flag" ${sup ? "" : "disabled"}><option value="auto" ${mode === "auto" ? "selected" : ""}>Auto</option><option value="routine" ${mode === "routine" ? "selected" : ""}>Routine</option><option value="always" ${mode === "always" ? "selected" : ""}>Always flag</option></select></td>
           <td><input data-k="status" value="${esc(r.status || "")}" placeholder="reports ___ managed well with medications" ${sup ? "" : "disabled"}></td>
           <td><select data-k="autoVital" ${sup ? "" : "disabled"}>${["", "bp", "hr", "bg"].map(k => `<option value="${k}" ${(r.autoVital || "") === k ? "selected" : ""}>${k ? k.toUpperCase() : "—"}</option>`).join("")}</select></td></tr>`; }).join("")}</table></div>
-    ${sup ? "" : `<p class="muted" style="margin-top:8px">Want something changed? Tell the supervisor, or use 🎓 in a note.</p>`}`;
-  $("#setPin")?.addEventListener("click", async () => {
-    const m = modal("Set supervisor PIN", `<div class="f"><span>New PIN (4+ digits)</span><input id="pn" type="password" inputmode="numeric"></div><p class="muted">Whoever knows this PIN can change team rules. Write it down somewhere safe.</p>`, `<button class="btn" data-x>Cancel</button><button class="btn p" id="pnGo">Save</button>`);
-    $("#pnGo", m).onclick = async () => { const v = $("#pn", m).value; if (v.length < 4) return toast("Use at least 4 digits"); S.settings.supPin = await sha(v); await S.store.setShared("settings.json", S.settings); try { sessionStorage.setItem("rn-sup", S.settings.supPin); } catch {} m.close(); rulesPage(); };
+    ${sup ? "" : `<p class="muted" style="margin-top:8px">Want something changed? Tell the supervisor, or use 🎓 in a note.</p>`}</section>`;
+  $$("[data-tab]").forEach(b => b.onclick = () => { S.supTab = b.dataset.tab; rulesPage(); });
+  $("#wFil")?.addEventListener("change", e => { S.supWho = e.target.value; rulesPage(); });
+  $("#nuGo")?.addEventListener("click", async () => { const n = $("#nuN").value.trim(); if (!n) return toast("Type their name"); await addUser(n, $("#nuR").value); toast(`${n} added. Starting PIN 1234`); rulesPage(); });
+  $$("tr[data-u]").forEach(tr => {
+    const u = users().find(x => x.id === tr.dataset.u);
+    $("[data-uname]", tr).onchange = async e => { u.name = e.target.value.trim() || u.name; await saveSettings(); toast("Saved"); };
+    $("[data-urole]", tr).onchange = async e => {
+      if (u.role === "supervisor" && e.target.value !== "supervisor" && users().filter(x => x.role === "supervisor").length < 2) { e.target.value = "supervisor"; return toast("Keep at least one supervisor"); }
+      u.role = e.target.value; await saveSettings(); toast("Saved"); };
+    $("[data-reset]", tr).onclick = async () => { if (await ask("Reset PIN?", `${esc(u.name)}'s PIN goes back to 1234, and they'll pick a new one next time they sign in.`, "Reset")) { u.pin = await pinHash(u, "1234"); u.mustReset = true; await saveSettings(); toast("PIN reset to 1234"); rulesPage(); } };
+    $("[data-urm]", tr)?.addEventListener("click", async () => { if (await ask("Remove person?", `${esc(u.name)} won't be able to sign in. Their past edits stay in the history.`, "Remove")) { S.settings.users = users().filter(x => x !== u); await saveSettings(); rulesPage(); } });
   });
-  $("#unlock")?.addEventListener("click", () => {
-    const m = modal("Supervisor unlock", `<div class="f"><span>PIN</span><input id="pn" type="password" inputmode="numeric"></div>`, `<button class="btn" data-x>Cancel</button><button class="btn p" id="pnGo">Unlock</button>`);
-    setTimeout(() => $("#pn", m)?.focus(), 50);
-    $("#pnGo", m).onclick = async () => { if (await sha($("#pn", m).value) === S.settings.supPin) { try { sessionStorage.setItem("rn-sup", S.settings.supPin); } catch {} m.close(); rulesPage(); } else toast("Wrong PIN"); };
-  });
-  $("#lock")?.addEventListener("click", () => { try { sessionStorage.removeItem("rn-sup"); } catch {} rulesPage(); });
   $$("[data-ok]").forEach(b => b.onclick = async () => { const it = pend.find(x => x.id === b.dataset.ok); applySuggestion(it); S.rules.pending = pend.filter(x => x !== it); await saveRules(); toast("Approved"); rulesPage(); });
   $$("[data-no]").forEach(b => b.onclick = async () => { S.rules.pending = pend.filter(x => x.id !== b.dataset.no); await saveRules(); rulesPage(); });
   $$("[data-delw]").forEach(b => b.onclick = async () => { S.rules.wording = S.rules.wording.filter(r => r.id !== b.dataset.delw); await saveRules(); rulesPage(); });
@@ -1184,4 +1394,4 @@ async function boot() {
 }
 boot();
 document.addEventListener("keydown", e => { if (e.key !== "Escape") return; const t = $(".tray"); if (t) { t.remove(); $("#gear")?.classList.remove("open"); return; } const m = $$(".scrim").at(-1); if (m) m.close(); });
-window.RN = { S, E };   // for debugging in the console
+window.RN = { S, E, Store, load: () => load() };   // for debugging in the console
