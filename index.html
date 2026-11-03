@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Security lock: this page may only load its own files and can never send data to any other server. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; frame-src blob:; manifest-src 'self'; connect-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <title>Resilience Notes</title>
@@ -17,21 +20,15 @@
 <meta property="og:description" content="Scribe note prep, flags, and printing.">
 <meta property="og:image" content="https://feirzen.github.io/Resilience-notes/icons/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="stylesheet" href="styles.css?v=10">
+<link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
 <header class="top" id="top"></header>
 <main id="main"><p style="padding:40px;text-align:center;color:#7a705c">Loading Resilience Notes…</p></main>
-<script>
-// If anything fails to load, show the reason on the page instead of a blank screen.
-window.addEventListener("error", e => { const m = document.getElementById("main"); if (m && !window.__rnStarted) m.innerHTML = '<div style="max-width:520px;margin:40px auto;padding:16px;border-radius:12px;background:#fdecec;color:#b8282d;font:14px system-ui">The app hit a problem while loading:<br><b>' + (e.message || (e.target && e.target.src) || "unknown") + '</b><br>Send Claude a screenshot of this.</div>'; }, true);
-setTimeout(() => { if (!window.__rnStarted) { const m = document.getElementById("main"); if (m && m.textContent.includes("Loading")) m.innerHTML = '<p style="padding:40px;text-align:center;color:#b8282d;font:14px system-ui">Still loading after 15 seconds. Try refreshing. If it stays blank, send Claude a screenshot.</p>'; } }, 15000);
-</script>
+<script src="boot-guard.js"></script>
 <script src="vendor/docx.iife.js"></script>
 <script src="vendor/jszip.min.js"></script>
 <script src="vendor/jspdf.umd.min.js"></script>
-<script src="vendor/peerjs.min.js"></script>
-<script src="vendor/qrcode.js"></script>
-<script type="module" src="app.js?v=10"></script>
+<script type="module" src="app.js?v=11"></script>
 </body>
 </html>

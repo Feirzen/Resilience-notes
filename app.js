@@ -5,7 +5,6 @@ import { toDocx } from "./lib/docx-out.js";
 import { readDocx } from "./lib/docx-in.js";
 import { toPdf } from "./lib/pdf-out.js";
 import { Store, supported } from "./lib/store.js";
-import { startPairing } from "./lib/pair.js";
 import { demoPatients } from "./lib/demo.js";
 import { MED_NAMES, findMed, abbr } from "./lib/meds.js";
 
@@ -965,29 +964,15 @@ async function discharge(pt) {
   });
 }
 
-// ---------------- vitals (grid + phone camera) ----------------
+// ---------------- vitals (typed in) ----------------
 function vitalsModal(unit, focusId) {
   const list = unitPts(unit), K = [["bp", "BP"], ["hr", "Pulse"], ["rr", "RR"], ["temp", "Temp"], ["o2", "O2"], ["bg", "BG"]];
-  const m = modal(`Vitals · ${unit} · ${md(S.today)}`, `<div class="vwrap">
-    <div class="card" style="padding:12px;box-shadow:none">
-      <b>Phone camera</b><p class="muted" style="margin:4px 0">Scan with your phone, then capture the vitals sheet. Pictures show here only and vanish when you close this.</p>
-      <div class="row"><span class="status"><span class="dot" id="vDot"></span><span id="vSt">Not started</span></span><span class="sp"></span><span class="code" id="vCode"></span></div>
-      <div class="qr" id="vQr" hidden></div>
-      <button class="btn sm" id="vPair" style="margin-top:6px">Show QR code</button>
-      <div class="shots" id="vShots"></div>
-    </div>
+  const m = modal(`Vitals · ${unit} · ${md(S.today)}`, `<div>
+    <p class="muted" style="margin-bottom:8px">Type each patient's vitals from the sheet. Tab moves to the next box.</p>
     <div style="overflow:auto"><table class="vgrid"><tr><th>Patient</th>${K.map(([, n]) => `<th>${n}</th>`).join("")}<th></th></tr>
       ${list.map(p => `<tr data-id="${p.id}"><td class="nm">${esc(p.name)}</td>${K.map(([k]) => `<td><input data-k="${k}" value="${esc(p.vitals?.[S.today]?.[k] || "")}" inputmode="${k === "bp" ? "text" : "decimal"}"></td>`).join("")}<td><button class="btn sm" data-clr>Clear</button></td></tr>`).join("")}
     </table></div></div>`,
     `<button class="btn warn" id="vAll">Clear all</button><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="vSave">Save vitals</button>`, true);
-  let pair = null; m.onclose = () => pair?.stop();
-  $("#vPair", m).onclick = () => {
-    pair?.stop();
-    pair = startPairing({ qrEl: $("#vQr", m), onCode: c => $("#vCode", m).textContent = c,
-      onStatus: (t, st) => { $("#vSt", m).textContent = t; $("#vDot", m).className = "dot " + (st || ""); },
-      onImage: blob => { const url = URL.createObjectURL(blob); const img = document.createElement("img"); img.src = url; img.onclick = () => window.open(url); $("#vShots", m).prepend(img); } });
-    $("#vPair", m).textContent = "New code";
-  };
   $$("[data-clr]", m).forEach(b => b.onclick = () => $$("input", b.closest("tr")).forEach(i => i.value = ""));
   $("#vAll", m).onclick = () => $$(".vgrid input", m).forEach(i => i.value = "");
   if (focusId) setTimeout(() => $(`tr[data-id="${focusId}"] input`, m)?.focus(), 80);
@@ -1336,7 +1321,7 @@ async function rulesPage() {
       <div class="row"><p class="muted" style="flex:1">The last changes saved to each note, newest first. Use it to find who to help, not to grade anyone.</p>
         <select id="wFil" class="btn sm"><option value="">Everyone</option>${[...new Set(edits.map(e => e.by))].map(n => `<option ${who === n ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
       <div class="card" style="overflow:auto;margin-top:8px"><table class="ovt zebra"><tr><th>When</th><th>Who</th><th>Patient</th><th>What</th></tr>
-        ${shown.map(e => `<tr onclick="location.hash='pt-${e.pt.id}'" style="cursor:pointer"><td>${new Date(e.at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td><b>${esc(e.by)}</b></td><td>${esc(e.pt.name)} <span class="muted">${e.pt.unit}</span></td><td>${esc(e.what)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">No edits yet.</td></tr>`}</table></div>
+        ${shown.map(e => `<tr data-go="${e.pt.id}" style="cursor:pointer"><td>${new Date(e.at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td><b>${esc(e.by)}</b></td><td>${esc(e.pt.name)} <span class="muted">${e.pt.unit}</span></td><td>${esc(e.what)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">No edits yet.</td></tr>`}</table></div>
     </section>
     <section data-sec="counts" ${sup && S.supTab === "counts" ? "" : "hidden"}>
       <div class="countgrid">${counts.map(([d, x]) => `<div class="sticky count"><div class="sh"><b>${md(d)}</b><span class="muted">saved by ${esc(x.count.by || "")}</span></div><pre>${esc(x.count.text)}</pre></div>`).join("") || `<p class="muted">No counts saved yet. Generate one from Home at the end of the day.</p>`}</div>
@@ -1358,6 +1343,7 @@ async function rulesPage() {
           <td><select data-k="autoVital" ${sup ? "" : "disabled"}>${["", "bp", "hr", "bg"].map(k => `<option value="${k}" ${(r.autoVital || "") === k ? "selected" : ""}>${k ? k.toUpperCase() : "—"}</option>`).join("")}</select></td></tr>`; }).join("")}</table></div>
     ${sup ? "" : `<p class="muted" style="margin-top:8px">Want something changed? Tell the supervisor, or use 🎓 in a note.</p>`}</section>`;
   $$("[data-tab]").forEach(b => b.onclick = () => { S.supTab = b.dataset.tab; rulesPage(); });
+  $$("[data-go]").forEach(tr => tr.onclick = () => { location.hash = "pt-" + tr.dataset.go; });
   $("#wFil")?.addEventListener("change", e => { S.supWho = e.target.value; rulesPage(); });
   $("#nuGo")?.addEventListener("click", async () => { const n = $("#nuN").value.trim(); if (!n) return toast("Type their name"); await addUser(n, $("#nuR").value); toast(`${n} added. Starting PIN 1234`); rulesPage(); });
   $$("tr[data-u]").forEach(tr => {

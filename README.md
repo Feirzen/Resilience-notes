@@ -9,9 +9,13 @@ Live: https://feirzen.github.io/Resilience-notes/ (capital R: GitHub Pages addre
 ## Layout
 - `app.js`, `styles.css`, `index.html`: the screens (home dashboard, unit list, paper-style note editor, vitals, prep review, print check, H&P form, flag list).
 - `engine/`: the rules (wording, prep, flags, reprint, times). `node engine/test.mjs`
-- `lib/layout.js`: note -> template blocks. `docx-out.js` (Word), `pdf-out.js` (print), `docx-in.js` (import hand-made notes), `store.js` (folder), `pair.js` (phone camera), `demo.js` (fake patients). `node lib/test.mjs` (needs docx, jszip, jspdf from npm)
-- `scan/camera.html`: the phone side of the camera link. Pictures go peer-to-peer and are never saved.
+- `lib/layout.js`: note -> template blocks. `docx-out.js` (Word), `pdf-out.js` (print), `docx-in.js` (import hand-made notes), `store.js` (folder), `demo.js` (fake patients). `node lib/test.mjs` (needs docx, jszip, jspdf from npm)
 - `vendor/`: libraries kept local so nothing loads from outside sites.
 
 ## Flags
 This project's flags are saved in the team folder (`_app-data/feedback.json`), not in any other flag system. Use the Flag list's "Copy open flags for Claude" button to work through them. Never put patient info in a flag.
+
+## Security
+- Patient data never leaves the work computer and the team folder. GitHub only serves the app's code.
+- `index.html` has a Content Security Policy: the page can only load its own files and is blocked from sending anything to any other server (no fetch, no outside images, no forms). Libraries in `vendor/` are kept local for the same reason.
+- No inline scripts, so the policy can stay strict.
