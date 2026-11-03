@@ -1,4 +1,4 @@
-# Resilience Notes
+# NoteMaker
 
 Browser app for the scribe team: preps tomorrow's progress notes, flags what needs attention, converts H&Ps to follow-ups, enters vitals (with a phone-camera link), reprints any past day, and prints a whole unit as one PDF with the provider circled.
 
