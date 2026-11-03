@@ -406,7 +406,7 @@ window.addEventListener("focus", async () => {        // pick up other computers
 });
 
 // Small shared badges: circled A for a new admit, teal count for notes to write up.
-const admA = p => p.status === "admit" ? `<span class="admA" title="New admit (H&P)">A</span>` : "";
+const admA = p => p.status === "admit" ? `<span class="admA" title="New admit (H&P)" aria-label="New admit"><svg viewBox="0 0 16 16" width="16" height="16"><circle cx="8" cy="8" r="8"/><path d="M5.1 11.6 8 4.4l2.9 7.2M6.15 9.1h3.7"/></svg></span>` : "";
 const qnTag = p => { const n = (p.notes || []).filter(x => x.kind === "quick" && !x.done).length; return n ? `<span class="qtag" title="${n} note${n > 1 ? "s" : ""} to write up">${ic("note", 12)}${n}</span>` : ""; };
 // ---------------- home dashboard ----------------
 const isDiabetes = n => /diabet|\bT[12]DM\b|\bDM ?[12]?\b|IDDM|NIDDM/i.test(n || "");
