@@ -34,7 +34,7 @@ function modal(title, body, foot = "", wide = false) {
     if (force !== true && s.dirty && !(await ask("Unsaved changes", "You typed something here that isn't saved yet. Close without saving?", "Close without saving"))) return;
     s.remove(); s.onclose?.();
   };
-  s.addEventListener("input", () => { s.dirty = true; });
+  s.addEventListener("input", e => { if (!e.target.closest("[data-nodirty]")) s.dirty = true; });
   s.addEventListener("click", e => { if (e.target.closest(".mfoot .btn.p")) s.dirty = false; }, true);   // the Save button
   s.addEventListener("click", e => { if (e.target === s || e.target.closest("[data-x]")) close(); });
   document.body.append(s); s.close = close; return s;
@@ -77,36 +77,69 @@ async function loadRules() {
   S.rules = r.dx || r.wording || r.pending ? { dx: r.dx || {}, wording: r.wording || [], pending: r.pending || [] } : { dx: r, wording: [], pending: [] };   // older files were just the dx list
 }
 const saveRules = () => S.store.setShared("rulebook.json", S.rules);
+// Labs waiting on a result, read from the note itself ("will order CMP", "TSH pending", "recheck BMP").
+const LABS = ["CBC with diff", "CBC", "CMP", "BMP", "TSH", "free T4", "T4", "T3", "Hgb A1c", "HbA1c", "A1c", "lipid panel", "urinalysis", "UA", "urine culture", "UDS", "urine drug screen",
+  "NT-proBNP", "BNP", "vitamin D", "B12", "folate", "iron studies", "ferritin", "LFTs", "LFT", "lipase", "amylase", "magnesium", "phosphorus", "potassium", "ammonia", "CK", "troponin",
+  "EKG", "ECG", "chest x-ray", "chest xray", "CXR", "x-ray", "xray", "CT", "MRI", "ultrasound", "hCG", "pregnancy test", "HIV", "RPR", "hepatitis panel", "ESR", "CRP", "INR",
+  "lithium level", "depakote level", "valproic acid level", "prolactin", "cortisol", "blood culture", "wound culture", "strep test", "COVID test", "flu test", "ALT", "AST"];
+const LAB_RE = new RegExp("\\b(" + LABS.map(x => x.replace(/[-/]/g, "\\$&")).join("|") + ")\\b", "gi");
+const WAIT_RE = /\b(order(?:ed|ing)?|re-?order(?:ed)?|pending|re-?check(?:ed|ing)?|check(?:ed|ing)?|will obtain|obtain(?:ed)?|drawn|sent)\b/i;
+function pendingLabs(pt, date = S.today) {
+  const since = E.addDays(date, -7), out = new Map();
+  const results = (pt.labs || []).map(l => ({ d: l.date, t: (l.text + " " + (l.bullets || []).join(" ")).toLowerCase() }));
+  for (const q of pt.problems) {
+    if (q.resolved && q.resolved < date) continue;
+    const src = [...(q.start >= since && q.planOpen ? [{ date: q.start, text: q.planOpen }] : []), ...q.plan, ...q.hpi].filter(e => e.date >= since && e.date <= date);
+    for (const e of src) for (const seg of String(e.text).split(/[.;]/)) {
+      if (!WAIT_RE.test(seg) || /\b(reviewed|resulted|results?|wnl|normal)\b/i.test(seg)) continue;
+      for (const m of seg.matchAll(LAB_RE)) { const k = m[1].toUpperCase(); if (!out.has(k) || out.get(k).since > e.date) out.set(k, { name: m[1], dx: q.name, problemId: q.id, since: e.date }); }
+    }
+  }
+  for (const n of pt.pendingLabs || []) if (!out.has(n.toUpperCase())) out.set(n.toUpperCase(), { name: n, since: "0000" });
+  return [...out.values()].filter(x => !results.some(r => r.d >= x.since && r.t.includes(x.name.toLowerCase())));
+}
 function flagsFor(pt, date = S.today) {
   const done = pt.addressed?.[date] || [];
   const extra = pt.problems.filter(q => q.start <= date && !(q.resolved && q.resolved < date) && isDiabetes(q.name) && onInsulin(q) === undefined)
     .map(q => ({ level: "amber", problemId: q.id, text: `Taking insulin? (${q.name})` }));
-  return [...E.flags(pt, date, rulebook()), ...extra].filter(f => !done.includes(f.text));
+  const labs = pendingLabs(pt, date).map(x => ({ level: "amber", problemId: x.problemId, text: `${x.name} pending` }));
+  const live = pt.problems.filter(q => q.start <= date && !(q.resolved && q.resolved < date));
+  const all = [...E.flags(pt, date, rulebook()).filter(f => !/pending$/i.test(f.text)), ...extra, ...labs].filter(f => !done.includes(f.text));
+  // Med flags ("Augmentin last dose today") sometimes come without a diagnosis; tie them to the diagnosis that has that med.
+  for (const f of all) if (!f.problemId) {
+    const lo = f.text.toLowerCase(), q = live.find(q => q.meds.some(m => m.name && lo.startsWith(m.name.toLowerCase().split(/\s+/)[0])));
+    if (q) f.problemId = q.id;
+  }
+  return all;
 }
 const popts = o => ({ providers: providerNames(), ...o });
 const loud = fs => fs.filter(f => f.level === "red" || f.level === "amber");
 const editedToday = (pt, p) => [...p.hpi, ...p.plan].some(e => e.date >= S.today && e.text !== e.auto);
 
 // ---------------- saving ----------------
+// Every save goes in a queue: the note's data first, then its Word file in the background.
+// A banner shows "Saving… 2 of 5" so you can keep working but won't close the tab mid-save.
+// If something takes too long or fails, the banner turns red with Keep trying / Retry / Undo.
 const timers = {}, queue = {}, conflicts = new Set();
-// One save at a time per patient, so quick clicks never step on each other.
 const enqueue = (pt, job) => (queue[pt.id] = (queue[pt.id] || Promise.resolve()).then(job).catch(e => { console.error(e); }));
-function save(pt, { docx = true } = {}) {
-  clearTimeout(timers[pt.id]);
-  timers[pt.id] = setTimeout(() => enqueue(pt, async () => {
-    pt.updated = Date.now();
-    const r = await S.store.savePatient(pt);
-    if (r === "conflict") return conflict(pt);
-    if (docx) queueDocx(pt);
-  }), 600);
+const SV = { total: 0, done: 0, pending: new Set(), failed: new Map(), good: new Map(), slow: false };
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} took too long`)), ms))]);
+function track(id) {
+  if (SV.pending.has(id)) return;
+  if (!SV.pending.size && !SV.failed.size) { SV.total = 0; SV.done = 0; }
+  SV.pending.add(id); SV.total++; saveBanner();
 }
+function finish(pt) { SV.good.set(pt.id, structuredClone(pt)); if (SV.pending.delete(pt.id)) SV.done++; saveBanner(); }
+function fail(pt, e, stage) { SV.pending.delete(pt.id); SV.failed.set(pt.id, { pt, e, stage }); console.warn("save failed", pt.name, e); saveBanner(); }
+function save(pt) { return saveNow(pt); }
 function saveNow(pt, { docx = true, why = "Edited note" } = {}) {
   clearTimeout(timers[pt.id]);
-  logEdit(pt, why);
+  logEdit(pt, why); track(pt.id); SV.failed.delete(pt.id);
   return enqueue(pt, async () => {
     pt.updated = Date.now();
-    const r = await S.store.savePatient(pt); if (r === "conflict") return conflict(pt);
-    if (docx) queueDocx(pt);
+    try { const r = await withTimeout(S.store.savePatient(pt), SV.slow ? 60000 : 15000, "Saving the note"); if (r === "conflict") { SV.pending.delete(pt.id); saveBanner(); return conflict(pt); } }
+    catch (e) { return fail(pt, e, "data"); }
+    if (docx) queueDocx(pt, true); else finish(pt);
   });
 }
 // Light edit history: who, when, what. The supervisor sees it in Supervisor tools.
@@ -123,8 +156,8 @@ function conflict(pt) {
   const m = modal("Changed on another computer", `<p class="muted" style="font-size:14px">${esc(pt.name)}'s note was saved from another computer after you opened it. Load their version, or keep yours (this overwrites theirs)?</p>`,
     `<button class="btn" data-load>Load theirs</button><button class="btn p" data-keep>Keep mine</button>`);
   m.onclose = () => conflicts.delete(pt.id);
-  $("[data-load]", m).onclick = e => busy(e.currentTarget, async () => { const fresh = await S.store.reloadPatient(pt.id); for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, fresh); m.close(); route(); toast("Loaded the latest version"); });
-  $("[data-keep]", m).onclick = e => busy(e.currentTarget, async () => { await S.store.savePatient(pt, true); await writeDocx(pt); m.close(); toast("Saved your version"); });
+  $("[data-load]", m).onclick = e => busy(e.currentTarget, async () => { const fresh = await S.store.reloadPatient(pt.id); for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, fresh); m.close(true); route(); toast("Loaded the latest version"); });
+  $("[data-keep]", m).onclick = e => busy(e.currentTarget, async () => { m.close(true); track(pt.id); await S.store.savePatient(pt, true); queueDocx(pt, true); });
 }
 const lastDate = pt => pt.problems.flatMap(p => [...p.hpi, ...p.plan]).reduce((a, e) => e.date > a ? e.date : a, S.today);
 const noteDate = pt => S.viewDate || (pt.status === "admit" ? S.today : lastDate(pt));
@@ -133,24 +166,50 @@ async function docxTarget(pt) {
   if (pt.status === "admit") return { dir: S.store.root, name: `${pt.file} ADMIT.docx` };
   return { dir: unitDir, name: `${pt.file}.docx` };
 }
-// Word files are written in the background, one at a time, so the screen never waits on them.
 const docxQ = new Map(); let docxRunning = false;
-function queueDocx(pt) { docxQ.set(pt.id, pt); pill(); if (!docxRunning) runDocx(); }
+function queueDocx(pt, tracked) { if (!tracked) track(pt.id); docxQ.set(pt.id, pt); saveBanner(); if (!docxRunning) runDocx(); }
 async function runDocx() {
   docxRunning = true;
   while (docxQ.size) {
-    const [id, pt] = docxQ.entries().next().value; docxQ.delete(id); pill();
-    try { await writeDocx(pt); } catch (e) { console.warn("Word file", pt.name, e); }
+    const [id, pt] = docxQ.entries().next().value; docxQ.delete(id);
+    try { await withTimeout(writeDocx(pt), SV.slow ? 90000 : 25000, "Writing the Word file"); finish(pt); }
+    catch (e) { fail(pt, e, "word"); }
   }
-  docxRunning = false; pill();
+  docxRunning = false; saveBanner();
 }
-function pill() {
-  let el = $("#savePill");
-  const n = docxQ.size + (docxRunning ? 1 : 0);
-  if (!el && n) { el = document.createElement("div"); el.id = "savePill"; el.className = "savepill"; document.body.append(el); }
-  if (el) { if (n) el.innerHTML = `<span class="spin"></span>Saving Word files… ${n}`; else { el.innerHTML = "✓ Word files saved"; setTimeout(() => { if (!docxQ.size && !docxRunning) el.remove(); }, 1500); } }
+function saveBanner() {
+  let el = $("#saveBar");
+  const busyN = SV.pending.size, failed = [...SV.failed.values()];
+  if (!busyN && !failed.length) { if (el && !el.dataset.done) { el.dataset.done = "1"; el.classList.remove("bad"); el.innerHTML = `${ic("check", 15)} All saved`; setTimeout(() => { if (!SV.pending.size && !SV.failed.size) el.remove(); }, 1400); } return; }
+  if (!el) { el = document.createElement("div"); el.id = "saveBar"; document.body.append(el); }
+  delete el.dataset.done;
+  if (failed.length) {
+    const f = failed[0];
+    el.className = "savebar bad";
+    el.innerHTML = `<div class="sbt">${ic("x", 15)} Couldn't save <b>${esc(f.pt.name)}</b>${failed.length > 1 ? ` (+${failed.length - 1} more)` : ""}</div>
+      <div class="sbs">${esc(f.e?.message || "Unknown problem")}. Your changes are still on this screen.</div>
+      <div class="row"><button class="btn sm" data-sv="keep">Keep trying</button><button class="btn sm" data-sv="retry">Retry now</button><button class="btn sm" data-sv="undo">Skip &amp; undo changes</button></div>`;
+    $$("[data-sv]", el).forEach(b => b.onclick = () => saveAction(b.dataset.sv, f));
+    return;
+  }
+  el.className = "savebar";
+  const n = Math.min(SV.done + 1, SV.total);
+  el.innerHTML = `<div class="sbt"><span class="spin"></span>Saving… ${n} of ${SV.total}</div><div class="bar2"><i style="width:${Math.round(SV.done / Math.max(1, SV.total) * 100)}%"></i></div><div class="sbs">You can keep working. Don't close this tab yet.</div>`;
 }
-window.addEventListener("beforeunload", e => { if (docxQ.size || docxRunning) { e.preventDefault(); e.returnValue = ""; } });
+async function saveAction(kind, f) {
+  const { pt, stage } = f; SV.failed.delete(pt.id);
+  if (kind === "keep") SV.slow = true;
+  if (kind === "undo") {
+    const g = SV.good.get(pt.id);
+    if (g) { for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, structuredClone(g)); try { await S.store.savePatient(pt, true); } catch {} toast(`${pt.name}: changes undone`); }
+    else toast("Nothing saved earlier to go back to. Reload to see the last saved version.");
+    saveBanner(); route(); return;
+  }
+  track(pt.id);
+  if (stage === "data") enqueue(pt, async () => { try { const r = await withTimeout(S.store.savePatient(pt, true), SV.slow ? 60000 : 15000, "Saving the note"); queueDocx(pt, true); } catch (e) { fail(pt, e, "data"); } });
+  else queueDocx(pt, true);
+}
+window.addEventListener("beforeunload", e => { if (SV.pending.size || SV.failed.size || docxQ.size || docxRunning) { e.preventDefault(); e.returnValue = ""; } });
 async function writeDocx(pt) {
   if (pt.status === "discharged") return;
   const { dir, name } = await docxTarget(pt);
@@ -190,7 +249,7 @@ function shell() {
       ${S.store?.demo ? `<span class="pill a" style="font-size:10px">DEMO</span>` : ""}
       <span class="sp"></span>
       <div class="today"><b>${new Date(S.today + "T12:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</b>
-        ${S.viewDate ? `<button class="oldbtn on" id="oldNotes">Viewing ${md(S.viewDate)} ✕</button>` : `<button class="oldbtn" id="oldNotes">Old notes</button>`}</div>
+        ${!(S.store && S.user) ? "" : S.viewDate ? `<button class="oldbtn on" id="oldNotes">Viewing ${md(S.viewDate)} ✕</button>` : `<button class="oldbtn" id="oldNotes">Old notes</button>`}</div>
       ${S.store && S.user ? `<button class="gear" id="helpB" aria-label="Help" title="Help">${ic("help", 18)}</button>` : ""}
       <button class="gear" id="gear" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
     </div>
@@ -198,7 +257,7 @@ function shell() {
       const red = counts[u].some(p => flagsFor(p).some(f => f.level === "red"));
       return `<a href="#unit-${u}" class="${curUnit === u ? "on" : ""}">${u.toUpperCase()}<i>${counts[u].length}</i>${red ? `<span class="rd"></span>` : ""}</a>`;
     }).join("")}</nav>` : ""}`;
-  $("#oldNotes").onclick = () => S.viewDate ? (S.viewDate = null, route()) : oldNotesModal();
+  if ($("#oldNotes")) $("#oldNotes").onclick = () => S.viewDate ? (S.viewDate = null, route()) : oldNotesModal();
   $("#gear").onclick = toggleTray;
   $("#helpB")?.addEventListener("click", helpMenu);
   $("#back")?.addEventListener("click", goBack);
@@ -228,33 +287,32 @@ function toggleTray() {
   $("[data-hub]", t)?.addEventListener("click", () => { close(); location.hash = "flags"; });
   $("[data-train]", t)?.addEventListener("click", () => { close(); location.hash = "training"; });
   $("[data-rules]", t)?.addEventListener("click", () => { close(); location.hash = "rules"; });
-  $("[data-site]", t)?.addEventListener("click", () => { close(); pickSite(true); });
+  $("[data-site]", t)?.addEventListener("click", () => { close(); leaveGuard(() => { setSite(null); S.user = null; try { sessionStorage.removeItem("rn-user"); } catch {} route(); }); });
   $("[data-pin]", t)?.addEventListener("click", () => { close(); newPinModal(users().find(u => u.id === S.user.id), "Change my PIN"); });
   $("[data-out]", t)?.addEventListener("click", () => { close(); signOut(); });
   $("[data-folder]", t)?.addEventListener("click", async () => { close(); await Store.forget(); S.store = null; S.user = null; S.pts = []; location.hash = ""; boot(); });
   setTimeout(() => document.addEventListener("click", function off(e) { if (!t.contains(e.target) && e.target.id !== "gear" && !e.target.closest("#gear")) { close(); document.removeEventListener("click", off); } }), 0);
 }
-// Hospital picker after signing in. Only Aspen Grove is set up so far.
-const SITES = { AGBH: "Aspen Grove Behavioral Hospital", SLBH: "Salt Lake Behavioral Health" };
-function pickSite(force) {
-  return new Promise(res => {
-    if (!force) { try { const v = sessionStorage.getItem("rn-site"); if (v) { S.site = v; return res(); } } catch {} }
-    const m = modal(`${ic("hospital")} Which hospital?`, `<div class="sites">${Object.entries(SITES).map(([k, n]) => `<button class="site" data-s="${k}"><b>${k}</b><span>${n}</span>${k === "SLBH" ? `<i>Not set up yet</i>` : ""}</button>`).join("")}</div><p class="warnbox" id="sNo" hidden>Salt Lake Behavioral isn't set up yet. It'll get its own units and setup, modeled on Aspen Grove.</p>`, "");
-    $(".mh [data-x]", m)?.remove();
-    $$("[data-s]", m).forEach(b => b.onclick = () => {
-      if (b.dataset.s === "SLBH") { $("#sNo", m).hidden = false; return; }
-      S.site = b.dataset.s; try { sessionStorage.setItem("rn-site", S.site); } catch {} m.close(true); route(); res();
-    });
-  });
+// The very first screen: pick the hospital. Only Aspen Grove is set up so far.
+const SITES = { AGBH: ["Aspen Grove", "Behavioral Hospital · Orem"], SLBH: ["Salt Lake", "Behavioral Health · Salt Lake City"] };
+function setSite(k) { S.site = k; try { k ? sessionStorage.setItem("rn-site", k) : sessionStorage.removeItem("rn-site"); } catch {} }
+function sitePage() {
+  $("#main").innerHTML = `<div class="sitepage"><img class="logo" src="icons/favicon.svg" alt=""><h1>NoteMaker</h1><p class="muted">Pick your hospital</p>
+    <div class="bigsites">${Object.entries(SITES).map(([k, [a, b]]) => `<button class="bigsite" data-s="${k}"><span class="bs-ic">${ic("hospital", 30)}</span><b>${a}</b><span>${b}</span>${k === "SLBH" ? `<i>Coming soon</i>` : ""}</button>`).join("")}</div>
+    <p class="warnbox" id="sNo" hidden>Salt Lake Behavioral isn't set up yet. It'll get its own units and setup, modeled on Aspen Grove.</p>
+    <button class="btn sm" id="sDemo">Try the demo</button></div>`;
+  $$("[data-s]").forEach(b => b.onclick = () => { if (b.dataset.s === "SLBH") { $("#sNo").hidden = false; return; } setSite(b.dataset.s); route(); });
+  $("#sDemo").onclick = async () => { setSite("AGBH"); S.store = await Store.demoStore(); await load(); };
 }
 // ---------------- routing ----------------
 function route() {
   shell();
   const h = location.hash.slice(1), main = $("#main");
   main.style.animation = "none"; void main.offsetWidth; main.style.animation = "";
+  if (!S.site) { try { S.site = sessionStorage.getItem("rn-site"); } catch {} }
+  if (!S.site) { $("#top .tabs")?.remove(); return sitePage(); }
   if (!S.store) return welcome();
   if (!S.user) { $("#top .tabs")?.remove(); return loginScreen(); }
-  if (!S.site) { if (S.store.demo) S.site = "AGBH"; else { try { S.site = sessionStorage.getItem("rn-site"); } catch {} if (!S.site) { pickSite(true); return; } } }
   S.today = localToday(); S.date = S.viewDate || S.today;
   if (h.startsWith("unit-")) return unitView(h.slice(5));
   if (h.startsWith("pt-")) { const pt = findPt(h.slice(3)); if (pt) S.date = noteDate(pt); return ptView(h.slice(3)); }
@@ -284,6 +342,10 @@ function leaveGuard(go) {
 }
 let lastHash = location.hash;
 window.addEventListener("hashchange", () => {
+  // A popup left open (browser Back, a link) shouldn't float over the next page.
+  const open = $$(".scrim").filter(x => x.close);
+  if (open.some(x => x.dirty)) { history.replaceState(null, "", lastHash || "#home"); return toast("Finish or close the open window first"); }
+  open.forEach(x => x.close(true));
   if (isDirty()) { const want = location.hash; history.replaceState(null, "", lastHash || "#home"); leaveGuard(() => { lastHash = want; location.hash = want; }); return; }
   lastHash = location.hash; S.open = null; route();
 });
@@ -294,7 +356,7 @@ const goBack = () => { const h = location.hash.slice(1); location.hash = h.start
 function welcome() {
   $("#main").innerHTML = `<div class="card welcome">
     <img class="logo" src="icons/favicon.svg" alt="">
-    <h1>NoteMaker</h1>
+    <h1>NoteMaker <span class="sitetag dark">${S.site || ""}</span></h1>
     <p class="muted" style="margin:6px 0 16px">Preps tomorrow's notes, flags what needs you, and prints a whole unit at once. Everything stays in your team folder; nothing is sent anywhere.</p>
     ${S.regrant ? `<button class="btn go" id="regrant">Reconnect to ${esc(S.regrant.name)}</button><p class="muted" style="margin-top:8px">Edge asks once per visit before the app can use the folder again.</p>` : ""}
     ${supported() ? `<button class="btn p" id="pick" style="margin-top:10px">Choose team folder</button>
@@ -320,13 +382,21 @@ async function load() {
   if (S.store.demo && !S.pts.length) {
     toast("Setting up fake patients…");
     S.pts = demoPatients(S.date);
-    await pool(S.pts, 6, pt => S.store.savePatient(pt, true)); S.pts.forEach(queueDocx);
+    await pool(S.pts, 6, pt => S.store.savePatient(pt, true)); S.pts.forEach(pt => queueDocx(pt));
   }
+  S.pts.forEach(pt => SV.good.set(pt.id, structuredClone(pt)));
   await loadRules();
   S.settings = await S.store.getShared("settings.json", {});
   if (!S.settings.users && S.settings.scribes?.length) { for (const n of S.settings.scribes) await addUser(n, "scribe"); }   // older setting
+  if (!S.store.demo) {                                   // starting accounts: both begin with PIN 1234
+    const has = n => users().some(u => u.name.replace(/\W/g, "").toLowerCase() === n.replace(/\W/g, "").toLowerCase());
+    let changed = false;
+    if (!has("B. Olsen")) { await addUser("B. Olsen", "supervisor"); changed = true; }
+    if (!has("S. Wills")) { const u = await addUser("S. Wills", "scribe"); u.admin = true; u.feedback = true; changed = true; }
+    if (changed) await saveSettings();
+  }
   if (S.store.demo) S.user = { id: "demo", name: "Demo user", role: "supervisor" };
-  else { let id = null; try { id = sessionStorage.getItem("rn-user"); } catch {} const u = users().find(x => x.id === id); S.user = u ? { id: u.id, name: u.name, role: u.role } : null; }
+  else { let id = null; try { id = sessionStorage.getItem("rn-user"); } catch {} const u = users().find(x => x.id === id); S.user = u ? { id: u.id, name: u.name, role: u.role, admin: !!u.admin } : null; }
   S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []); S.ann = await S.store.getShared("announce.json", []); S.table = await S.store.getShared("table.json", {});
   if (!location.hash || location.hash === "#") location.hash = "home"; else route();
 }
@@ -335,12 +405,15 @@ window.addEventListener("focus", async () => {        // pick up other computers
   try { S.pts = await S.store.loadPatients(); S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []); S.ann = await S.store.getShared("announce.json", []); S.table = await S.store.getShared("table.json", {}); route(); } catch {}
 });
 
+// Small shared badges: circled A for a new admit, teal count for notes to write up.
+const admA = p => p.status === "admit" ? `<span class="admA" title="New admit (H&P)">A</span>` : "";
+const qnTag = p => { const n = (p.notes || []).filter(x => x.kind === "quick" && !x.done).length; return n ? `<span class="qtag" title="${n} note${n > 1 ? "s" : ""} to write up">${ic("note", 12)}${n}</span>` : ""; };
 // ---------------- home dashboard ----------------
 const isDiabetes = n => /diabet|\bT[12]DM\b|\bDM ?[12]?\b|IDDM|NIDDM/i.test(n || "");
 const onInsulin = q => q.insulin ?? (q.meds.some(m => /insulin|lantus|humalog|novolog|glargine|lispro|basaglar|levemir|tresiba/i.test(m.name || "")) ? true : undefined);
 const a3 = p => p.always3 || autoA3(p, p.problems.filter(q => !(q.resolved && q.resolved < S.today)));
 const always3 = p => ["P", "OD"].includes(a3(p));
-const effBill = (p, d) => p.bill?.[d] ?? (always3(p) && (p.admitDate || d) <= d && (!p.dischargedOn || p.dischargedOn >= d) ? "3" : "");
+const effBill = (p, d) => p.bill?.[d] ?? (tset().today.default3 && always3(p) && (p.admitDate || d) <= d && (!p.dischargedOn || p.dischargedOn >= d) ? "3" : "");
 const fullMDY = d => `${md(d)}/${d.slice(0, 4)}`;
 let dayQ = Promise.resolve();
 function saveDay(patch) {                             // one at a time; re-read first since other computers write here too
@@ -389,46 +462,84 @@ function annModal() {
   $("#aGo", m).onclick = async () => { const t = $("#aT", m).value.trim(); if (!t) return; await annSave(a => a.push({ id: uid(), text: t, to, by: S.user?.name, byId: S.user?.id, date: S.today, at: Date.now(), seen: [] })); m.close(true); home(); };
 }
 // ---- the patient table's own settings (providers and supervisors can change these)
+const SWATCH = [["Red", "#c4262e", "#f3a5a8"], ["Orange", "#b4531a", "#f6b68a"], ["Gold", "#8a6400", "#e9c661"], ["Green", "#1f8a55", "#8fd4ac"], ["Teal", "#0f7c86", "#86d1d8"],
+  ["Blue", "#2a62c9", "#9cbcf2"], ["Indigo", "#4b45b8", "#b0acf0"], ["Purple", "#6d3fc0", "#c6a9f2"], ["Pink", "#b8327a", "#f2a7cf"], ["Gray", "#5d5a52", "#b9b3a6"]];
+const NAMED = { orange: "#b4531a", purple: "#6d3fc0", red: "#c4262e", blue: "#2a62c9", green: "#1f8a55" };
 const TABLE_DEFAULT = {
-  abbr: [["Acute otitis media", "AOM"], ["Asthma", "Az"], ["Chronic back pain", "CBP"], ["Chronic kidney disease", "CKD"], ["Diabetes mellitus type 2", "DM2"], ["Type 2 diabetes", "DM2"],
-    ["Hypertension", "HTN"], ["Gastroesophageal reflux disease", "GERD"], ["Headache", "HA"], ["Irritable bowel syndrome", "IBS"], ["Insomnia", "Ins"], ["Dizziness", "Dz"], ["Constipation", "C"], ["Diarrhea", "D"]],
-  colors: [["diabet", "purple"], ["dm2", "purple"]],
-  acute: "orange",
-  cols: { issues: true, psych: true, notes: true, yest: true, today: true, a3: true },
+  patient: { admit: true, notes: true },
+  issues: { show: true, red: true, amber: true, keep: true },
+  dx: { acute: "#b4531a", rules: [["diabet", "#6d3fc0"], ["dm2", "#6d3fc0"]], shortNames: true,
+    abbr: [["Acute otitis media", "AOM"], ["Asthma", "Az"], ["Chronic back pain", "CBP"], ["Chronic kidney disease", "CKD"], ["Diabetes mellitus type 2", "DM2"], ["Type 2 diabetes", "DM2"],
+      ["Hypertension", "HTN"], ["Gastroesophageal reflux disease", "GERD"], ["Headache", "HA"], ["Irritable bowel syndrome", "IBS"], ["Insomnia", "Ins"], ["Dizziness", "Dz"], ["Constipation", "C"], ["Diarrhea", "D"]] },
+  psych: { show: true, short: false },
+  notes: { show: true, insulin: true, keep: true },
+  yest: { show: true },
+  today: { show: true, default3: true },
+  a3: { show: true },
 };
-const TCOL = { orange: "#b4531a", purple: "#6d3fc0", red: "#c4262e", blue: "#2a62c9", green: "#1f8a55", none: "" };
-const tset = () => ({ ...TABLE_DEFAULT, ...(S.table || {}), cols: { ...TABLE_DEFAULT.cols, ...(S.table?.cols || {}) } });
-const canEditTable = () => S.store?.demo || ["provider", "supervisor"].includes(S.user?.role);
-const tAbbr = n => { const hit = tset().abbr.find(([f]) => f.toLowerCase() === String(n).toLowerCase()); return hit ? hit[1] : n; };
+function tset() {
+  const T = S.table || {}, d = structuredClone(TABLE_DEFAULT);
+  if (T.cols && !T.issues) {                       // settings saved by the earlier version
+    for (const k of ["issues", "psych", "notes", "yest", "today", "a3"]) if (T.cols[k] === false) d[k].show = false;
+    if (T.acute) d.dx.acute = NAMED[T.acute] || T.acute;
+    if (T.colors) d.dx.rules = T.colors.map(([m, c]) => [m, NAMED[c] || c]);
+    if (T.abbr) d.dx.abbr = T.abbr;
+    return withCols(d);
+  }
+  for (const k of Object.keys(d)) if (T[k]) d[k] = { ...d[k], ...T[k] };
+  return withCols(d);
+}
+const withCols = t => ({ ...t, cols: { issues: t.issues.show, psych: t.psych.show, notes: t.notes.show, yest: t.yest.show, today: t.today.show, a3: t.a3.show } });
+const canEditTable = () => S.store?.demo || ["provider", "supervisor"].includes(S.user?.role) || !!S.user?.admin;
+const tAbbr = n => { const t = tset(); if (!t.dx.shortNames) return n; const hit = t.dx.abbr.find(([f]) => f.toLowerCase() === String(n).toLowerCase()); return hit ? hit[1] : n; };
 function dxColor(name, acute) {
-  const r = tset().colors.find(([m]) => m && String(name).toLowerCase().includes(m.toLowerCase()));
-  return r ? TCOL[r[1]] : acute ? TCOL[tset().acute] : "";
+  const t = tset(), r = t.dx.rules.find(([m]) => m && String(name).toLowerCase().includes(m.toLowerCase()));
+  return r ? r[1] : acute ? t.dx.acute : "";
+}
+const TCOL = { orange: "#b4531a" };
+function swatches(key, val) {
+  return `<div class="swatches" data-sw="${key}">${SWATCH.map(([n, dk, lt]) => [[n, dk], [n + " (light)", lt]]).flat().map(([n, c]) =>
+    `<button type="button" class="sw ${String(val).toLowerCase() === c ? "on" : ""}" data-c="${c}" title="${n}" style="background:${c}"></button>`).join("")}
+    <button type="button" class="sw none ${!val ? "on" : ""}" data-c="" title="No color">${ic("x", 12)}</button></div>`;
 }
 function tableSettings() {
-  const t = tset(), C = Object.keys(TCOL);
-  const colName = { issues: "Pertinent issues", psych: "Psychiatric diagnosis", notes: "Notes", yest: "Yesterday's billing", today: "Today's billing", a3: "Always 3?" };
-  const m = modal(`${ic("palette")} Table settings`, `
-    <div class="lbl" style="margin-top:0">Columns</div><div class="row">${Object.entries(colName).map(([k, n]) => `<label class="chip ${t.cols[k] ? "on" : ""}"><input type="checkbox" data-col="${k}" ${t.cols[k] ? "checked" : ""} hidden>${n}</label>`).join("")}</div>
-    <div class="lbl">Colors</div>
-    <div class="row" style="margin-bottom:6px"><span class="muted">Acute / flagged diagnoses:</span><select id="tsA" class="btn sm">${C.map(c => `<option ${t.acute === c ? "selected" : ""}>${c}</option>`).join("")}</select></div>
-    <div id="tsC">${t.colors.map(([mm, c]) => colorRow(mm, c)).join("")}</div><button class="btn sm" id="tsCA">${ic("plus", 13)} Add a color rule</button>
-    <div class="lbl">Short names (how diagnoses shorten in the table)</div>
-    <div id="tsB">${t.abbr.map(([f, a]) => abbrRow(f, a)).join("")}</div><button class="btn sm" id="tsBA">${ic("plus", 13)} Add a short name</button>`,
-    `<button class="btn" id="tsR">Reset to defaults</button><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="tsGo">Save</button>`, true);
-  function colorRow(mm = "", c = "orange") { return `<div class="row tsrow"><input class="btn sm" data-cm value="${esc(mm)}" placeholder="Diagnosis contains… (e.g. cellulitis)"><select class="btn sm" data-cc>${C.map(x => `<option ${x === c ? "selected" : ""}>${x}</option>`).join("")}</select><button class="btn sm" data-del>${ic("x", 13)}</button></div>`; }
-  function abbrRow(f = "", a = "") { return `<div class="row tsrow"><input class="btn sm" data-bf value="${esc(f)}" placeholder="Full diagnosis"><input class="btn sm short" data-ba value="${esc(a)}" placeholder="Short"><button class="btn sm" data-del>${ic("x", 13)}</button></div>`; }
-  const wire = () => $$("[data-del]", m).forEach(b => b.onclick = () => { b.closest(".tsrow").remove(); m.dirty = true; });
+  const t = tset();
+  const sw = (on, key) => `<label class="switch" onclick="event.stopPropagation()"><input type="checkbox" data-show="${key}" ${on ? "checked" : ""}><i></i></label>`;
+  const opt = (key, sub, on, label) => `<label class="switch sm"><input type="checkbox" data-opt="${key}.${sub}" ${on ? "checked" : ""}><i></i>${label}</label>`;
+  const sec = (key, icon, title, show, body, open) => `<details class="tsec" ${open ? "open" : ""}><summary>${ic(icon, 15)}<b>${title}</b><span class="sp"></span>${show === null ? `<span class="muted small">always shown</span>` : sw(show, key)}<span class="chev">▸</span></summary><div class="tsb">${body}</div></details>`;
+  const ruleRow = (m = "", c = "#2a62c9") => `<div class="tsrule"><input class="btn sm" data-cm value="${esc(m)}" placeholder="Diagnosis contains… (e.g. cellulitis)"><input type="hidden" data-cc value="${c}">${swatches("rule", c)}<button class="iconbtn" data-del title="Remove">${ic("x", 14)}</button></div>`;
+  const abbrRow = (f = "", a = "") => `<div class="row tsrow"><input class="btn sm" data-bf value="${esc(f)}" placeholder="Full diagnosis"><span class="muted">→</span><input class="btn sm short" data-ba value="${esc(a)}" placeholder="Short"><button class="iconbtn" data-del title="Remove">${ic("x", 14)}</button></div>`;
+  const m = modal(`${ic("palette")} Table settings`, `<p class="muted small" style="margin-bottom:10px">Open a column to change what it shows. Changes apply for everyone.</p>
+    ${sec("patient", "user", "Patient", null, opt("patient", "admit", t.patient.admit, "Show the A badge for new admits") + opt("patient", "notes", t.patient.notes, "Show notes still to write up"))}
+    ${sec("issues", "flag", "Pertinent issues", t.issues.show, opt("issues", "red", t.issues.red, "Follow-up flags (red)") + opt("issues", "amber", t.issues.amber, "Things to check (yellow)") + opt("issues", "keep", t.issues.keep, "Keep-in-mind notes"))}
+    ${sec("dx", "palette", "Medical diagnoses", null, `
+      <div class="lbl">Color for acute or flagged diagnoses</div><input type="hidden" id="tsA" value="${t.dx.acute}">${swatches("acute", t.dx.acute)}
+      <div class="lbl">Color rules</div><div id="tsC">${t.dx.rules.map(([mm, c]) => ruleRow(mm, c)).join("")}</div><button class="btn sm" id="tsCA">${ic("plus", 13)} Add a color rule</button>
+      <div class="lbl row"><span>Short names</span><span class="sp"></span>${opt("dx", "shortNames", t.dx.shortNames, "Use short names")}</div>
+      <div id="tsB">${t.dx.abbr.map(([f, a]) => abbrRow(f, a)).join("")}</div><button class="btn sm" id="tsBA">${ic("plus", 13)} Add a short name</button>`, true)}
+    ${sec("psych", "psych", "Psychiatric diagnosis", t.psych.show, opt("psych", "short", t.psych.short, "Shorten long diagnoses (first part only)"))}
+    ${sec("notes", "note", "Notes", t.notes.show, opt("notes", "insulin", t.notes.insulin, "Insulin status for diabetes") + opt("notes", "keep", t.notes.keep, "Keep-in-mind notes"))}
+    ${sec("yest", "history", "Yesterday's billing", t.yest.show, `<p class="muted small">Shows what was billed the day before.</p>`)}
+    ${sec("today", "count", "Today's billing", t.today.show, opt("today", "default3", t.today.default3, "Show a light 3 for Always-3 patients (counts as 3)"))}
+    ${sec("a3", "shield", "Always 3?", t.a3.show, `<p class="muted small">P always 3 · ~ 3 on admit, then mental status · M medical issue · OD overdose.</p>`)}`,
+    `<button class="btn" id="tsR">${ic("history", 14)} Reset</button><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="tsGo">Save</button>`, true);
+  const wire = () => {
+    $$("[data-del]", m).forEach(b => b.onclick = () => { b.closest(".tsrule,.tsrow").remove(); m.dirty = true; });
+    $$(".swatches", m).forEach(g => $$(".sw", g).forEach(b => b.onclick = () => { $$(".sw", g).forEach(x => x.classList.toggle("on", x === b));
+      const hid = g.previousElementSibling; if (hid?.type === "hidden") hid.value = b.dataset.c; m.dirty = true; }));
+  };
   wire();
-  $$("label.chip", m).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked)));
-  $("#tsCA", m).onclick = () => { $("#tsC", m).insertAdjacentHTML("beforeend", colorRow()); wire(); };
+  $("#tsCA", m).onclick = () => { $("#tsC", m).insertAdjacentHTML("beforeend", ruleRow()); wire(); };
   $("#tsBA", m).onclick = () => { $("#tsB", m).insertAdjacentHTML("beforeend", abbrRow()); wire(); };
-  $("#tsR", m).onclick = async () => { if (await ask("Reset table settings?", "Puts colors, short names, and columns back to how they started.", "Reset")) { S.table = {}; await S.store.setShared("table.json", S.table); m.close(true); home(); } };
+  $("#tsR", m).onclick = async () => { if (await ask("Reset table settings?", "Puts colors, short names, and columns back to how they started, for everyone.", "Reset")) { S.table = {}; await S.store.setShared("table.json", S.table); m.close(true); home(); } };
   $("#tsGo", m).onclick = async () => {
-    S.table = { acute: $("#tsA", m).value,
-      cols: Object.fromEntries($$("[data-col]", m).map(c => [c.dataset.col, c.checked])),
-      colors: $$("#tsC .tsrow", m).map(r => [$("[data-cm]", r).value.trim(), $("[data-cc]", r).value]).filter(([x]) => x),
-      abbr: $$("#tsB .tsrow", m).map(r => [$("[data-bf]", r).value.trim(), $("[data-ba]", r).value.trim()]).filter(([f, a]) => f && a) };
-    await S.store.setShared("table.json", S.table); m.close(true); toast("Table settings saved for everyone"); home();
+    const n = structuredClone(TABLE_DEFAULT);
+    $$("[data-show]", m).forEach(c => n[c.dataset.show].show = c.checked);
+    $$("[data-opt]", m).forEach(c => { const [k, sub] = c.dataset.opt.split("."); n[k][sub] = c.checked; });
+    n.dx.acute = $("#tsA", m).value;
+    n.dx.rules = $$("#tsC .tsrule", m).map(r => [$("[data-cm]", r).value.trim(), $("[data-cc]", r).value]).filter(([x]) => x);
+    n.dx.abbr = $$("#tsB .tsrow", m).map(r => [$("[data-bf]", r).value.trim(), $("[data-ba]", r).value.trim()]).filter(([f, a]) => f && a);
+    S.table = n; await S.store.setShared("table.json", S.table); m.close(true); toast("Table settings saved for everyone"); home();
   };
 }
 function home() {
@@ -443,9 +554,9 @@ function home() {
   const dxCell = p => p.problems.filter(q => !(q.resolved && q.resolved < S.today)).map(q => {
     const acute = flagsFor(p).some(x => x.problemId === q.id && x.level === "red") || q.alwaysFlag || q.meds.some(m => m.end && m.end >= S.today);
     const c = dxColor(q.name, acute); return c ? `<span class="dxc" style="color:${c}">${esc(tAbbr(q.name))}</span>` : esc(tAbbr(q.name)); }).join(", ") || "None";
-  const notesCell = p => [...p.problems.filter(q => isDiabetes(q.name) && !(q.resolved && q.resolved < S.today)).map(q => { const i = onInsulin(q);
+  const notesCell = p => [...p.problems.filter(q => t.notes.insulin && isDiabetes(q.name) && !(q.resolved && q.resolved < S.today)).map(q => { const i = onInsulin(q);
       return i === true ? "Taking insulin" : i === false ? "No insulin" : `<span class="dxc" style="color:${TCOL.orange}">Insulin?</span>`; }),
-    ...(p.notes || []).filter(n => n.kind === "keep").map(n => esc(n.text))].join("; ");
+    ...(t.notes.keep ? (p.notes || []).filter(n => n.kind === "keep").map(n => esc(n.text)) : [])].join("; ");
   const C = t.cols;
   $("#main").innerHTML = `<div class="homegrid"><div style="min-width:0">
     <div class="row"><h1>${dayName}</h1><span class="sp"></span>
@@ -460,7 +571,7 @@ function home() {
     <div class="card census" data-help="census">
       <div class="cz"><b>${live.length}</b><span>in house</span></div>
       <div class="cz"><b>${admits.length}</b><span>admit${admits.length === 1 ? "" : "s"} today</span></div>
-      <div class="cadm">${admits.map(p => `<a href="#pt-${p.id}">${esc(p.name)}<i>${p.unit}</i></a>`).join("") || `<span class="muted">No new admits yet</span>`}</div>
+      <div class="cadm">${admits.map(p => `<a href="#pt-${p.id}">${admA(p)}${esc(p.name)}<i>${p.unit}</i></a>`).join("") || `<span class="muted">No new admits yet</span>`}</div>
     </div>
     <div class="card fuwrap" data-help="units">
       <div class="fuh"><b>${fuTotal}</b> follow-up flag${fuTotal === 1 ? "" : "s"}</div>
@@ -474,12 +585,13 @@ function home() {
       return `<div class="ovu ${open ? "open" : ""}" data-u="${u}"><div class="ovh"><span class="ovn">${u.toUpperCase()}</span>
         <span class="muted">${l.length} patient${l.length === 1 ? "" : "s"}${nFlag ? ` · ${nFlag} with pertinent issues` : ""}</span><span class="sp"></span><span class="chev">▸</span></div>
         <div class="ovb">${l.length ? `<table class="ovt xl zebra"><tr><th></th><th>Patient</th>${C.issues ? "<th>Pertinent issues</th>" : ""}<th>Medical diagnoses</th>${C.psych ? "<th>Psychiatric diagnosis</th>" : ""}${C.notes ? "<th>Notes</th>" : ""}${C.yest ? `<th title="Billing level yesterday">Yest.</th>` : ""}${C.today ? `<th title="Billing level today">Today</th>` : ""}${C.a3 ? "<th>Always 3?</th>" : ""}</tr>
-          ${l.map((p, i) => { const names = p.problems.map(q => q.name), f = loud(flagsFor(p)).map(x => x.text).filter(x => !/^Taking insulin\?/.test(x) && !names.includes(x));
+          ${l.map((p, i) => { const names = p.problems.map(q => q.name), f = loud(flagsFor(p)).filter(x => (x.level === "red" ? t.issues.red : t.issues.amber)).map(x => x.text).filter(x => !/^Taking insulin\?/.test(x) && !names.includes(x));
+            if (t.issues.keep) f.push(...(p.notes || []).filter(n => n.kind === "keep").map(n => n.text));
             const qn = (p.notes || []).some(n => n.kind === "quick" && !n.done);
-            return `<tr data-pt="${p.id}"><td class="muted">${i + 1}</td><td class="nm"><b>${esc(p.name)}</b>${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}${qn ? `<i class="d q" title="Note to write up"></i>` : ""}</td>
-              ${C.issues ? `<td>${esc(f.join("; "))}</td>` : ""}<td>${dxCell(p)}</td>${C.psych ? `<td>${esc(p.psych?.dx || "")}</td>` : ""}${C.notes ? `<td>${notesCell(p)}</td>` : ""}
+            return `<tr data-pt="${p.id}"><td class="muted">${i + 1}</td><td class="nm"><b>${esc(p.name)}</b>${t.patient.admit ? admA(p) : ""}${t.patient.notes ? qnTag(p) : ""}</td>
+              ${C.issues ? `<td>${esc(f.join("; "))}</td>` : ""}<td>${dxCell(p)}</td>${C.psych ? `<td>${esc(t.psych.short ? String(p.psych?.dx || "").split(/[,(;]/)[0] : p.psych?.dx || "")}</td>` : ""}${C.notes ? `<td>${notesCell(p)}</td>` : ""}
               ${C.yest ? `<td class="muted" style="text-align:center">${esc(effBill(p, yest)) || "—"}</td>` : ""}
-              ${C.today ? `<td><input class="cell" data-bill value="${esc(p.bill?.[S.today] ?? "")}" placeholder="${always3(p) ? "3" : ""}" maxlength="1" inputmode="numeric"></td>` : ""}
+              ${C.today ? `<td><input class="cell" data-bill value="${esc(p.bill?.[S.today] ?? "")}" placeholder="${t.today.default3 && always3(p) ? "3" : ""}" maxlength="1" inputmode="numeric"></td>` : ""}
               ${C.a3 ? `<td><select class="cell" data-a3>${["~", "P", "M", "OD"].map(o => `<option ${a3(p) === o ? "selected" : ""}>${o}</option>`).join("")}</select></td>` : ""}</tr>`; }).join("")}</table>` : `<p class="muted" style="padding:10px">No patients.</p>`}</div></div>`;
     }).join("")}</div>
     ${canEditTable() ? `<div class="row" style="margin-top:8px"><span class="sp"></span><button class="btn sm" id="tSet">${ic("palette", 14)} Table settings</button></div>` : ""}
@@ -607,21 +719,25 @@ function unitView(u) {
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
       <button class="btn" id="qn">${ic("note")} Make a Note</button><button class="btn" id="vit">${ic("vitals")} Vitals</button><button class="btn" id="prn">${ic("print")} Print unit</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
     ${preppedCount ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">${preppedCount} of ${l.length} notes prepped for ${md(tmw)}.<span class="sp"></span><button class="btn sm" id="unprepU">Unprep ${u}</button></div>` : ""}
-    <div class="row" style="margin:-4px 0 10px"><span class="sp"></span><button class="btn sm" id="reimp" title="Start this unit over from the original Word files">Start ${u} over from the original files</button></div>
+
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
       const fs = loud(flagsFor(p)); const top = fs.find(f => f.level === "red") || fs[0];
       const qn = (p.notes || []).filter(n => n.kind === "quick" && !n.done).length;
-      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="tag">ADMIT</span>` : ""}${qn ? `<span class="tag note"><i class="d q"></i>${qn} quick note${qn > 1 ? "s" : ""}</span>` : ""}</span>
+      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="admpill">${ic("hp", 12)} New admit</span>` : ""}${qn ? `<span class="qpill">${ic("note", 12)} ${qn} note${qn > 1 ? "s" : ""} to write up</span>` : ""}</span>
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
-    }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>`;
-  $("#reimp").onclick = e => busy(e.currentTarget, () => restartUnit(u));
+    }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>
+    ${(() => { const dc = S.pts.filter(p => p.unit === u && p.status === "discharged").sort((a, b) => (b.dischargedOn || "").localeCompare(a.dischargedOn || ""));
+      return dc.length ? `<details class="dcbox"><summary>${ic("door", 14)} Discharged <span class="muted">(${dc.length})</span></summary><div class="card list">${dc.map(p => `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}</span><span class="mk q">discharged ${p.dischargedOn ? md(p.dischargedOn) : ""}</span></a>`).join("")}</div></details>` : ""; })()}
+    <div class="row" style="margin-top:14px"><span class="sp"></span><button class="btn sm" id="reimp">${ic("history", 13)} Reset ${u} files to originals</button></div>`;
+  $("#reimp").onclick = () => restartUnit(u);
   $("#unprepU")?.addEventListener("click", e => busy(e.currentTarget, async () => {
     if (!(await ask(`Unprep ${u}?`, `Removes everything added for ${md(tmw)} so the notes go back to today (${md(S.today)}). H&amp;Ps converted today go back to H&amp;Ps.`, "Unprep"))) return;
     const pg = progress(`Unprepping ${u}`); try { await pool(l.filter(isPrepped), 6, p => unprep(p)); } finally { pg.close(); } toast(`${u} is back to ${md(S.today)}`); route();
   }));
   $("#vit").onclick = () => vitalsModal(u);
   $("#qn").onclick = () => stickyModal(l);
+  $$(".dcbox .it").forEach(a => a.addEventListener("click", () => {}));
   $("#prn").onclick = () => printModal(unitPts(u));
   $("#prep").onclick = e => busy(e.currentTarget, () => prepUnit(u));
   $("#catch")?.addEventListener("click", e => busy(e.currentTarget, async () => {
@@ -632,24 +748,40 @@ function unitView(u) {
   }));
 }
 
-// Undo the app's changes for one unit: put the original Word files back, forget the app's copies, import again.
+// Undo the app's changes for a unit (or just some patients): put the original Word files back and import them again.
 async function restartUnit(u) {
-  if (!(await ask(`Start ${u} over?`, `This puts back the original Word files the app backed up for ${u}, forgets the app's version of those notes, and opens Import so you can bring them in fresh. Edits made in the app for ${u} are lost.`, "Start over"))) return;
-  const pg = progress(`Resetting ${u}`);
-  try {
-    const unitDir = await S.store.unitDir(u, true);
-    const orig = await S.store.dir(await S.store.data(), "originals", true);
-    for (const e of await S.store.entries(orig)) {
-      if (e.h.kind === "file" && e.name.startsWith(u + " - ")) {
-        await S.store.write(unitDir, e.name.slice(u.length + 3), await (await e.h.getFile()).arrayBuffer());
-        await orig.removeEntry(e.name);
+  const orig = await S.store.dir(await S.store.data(), "originals", true);
+  const backups = (await S.store.entries(orig)).filter(e => e.h.kind === "file" && e.name.startsWith(u + " - ")).map(e => ({ e, file: e.name.slice(u.length + 3).replace(/\.docx$/i, "") }));
+  const pts = S.pts.filter(p => p.unit === u && active(p));
+  const rows = pts.map(p => ({ p, b: backups.find(b => b.file === p.file) }));
+  const m = modal(`${ic("history")} Reset ${u} files to originals`, `
+    <p style="font-size:14px;margin-bottom:8px"><b>This can't be undone.</b> For each patient you pick:</p>
+    <ul class="bul"><li>Their Word file is replaced with the <b>original</b> one from before NoteMaker first changed it.</li>
+      <li>Everything done in NoteMaker for them is <b>erased</b>: edits, preps, meds, flags addressed, notes, billing.</li>
+      <li>Then Import opens so you can bring the originals back in.</li>
+      <li>Patients with no saved original only lose NoteMaker's copy; their current Word file stays as it is.</li></ul>
+    <label class="switch" style="margin:10px 0" data-nodirty><input type="checkbox" id="rsPick"><i></i>Only reset some patients</label>
+    <div id="rsList" hidden data-nodirty>${rows.map((r, k) => `<label class="chk"><input type="checkbox" data-k="${k}" checked><div>${esc(r.p.name)}<small>${r.b ? "original saved" : "no original saved"}</small></div></label>`).join("")}</div>
+    <div class="f" style="margin-top:10px"><span>Type RESET to confirm</span><input id="rsT" autocomplete="off" data-nodirty></div>`,
+    `<button class="btn" data-x>Cancel</button><button class="btn warn" id="rsGo" disabled>Reset files</button>`);
+  $("#rsPick", m).onchange = e => { $("#rsList", m).hidden = !e.target.checked; };
+  $("#rsT", m).oninput = e => { $("#rsGo", m).disabled = e.target.value.trim().toUpperCase() !== "RESET"; };
+  $("#rsGo", m).onclick = async () => {
+    const pick = $("#rsPick", m).checked ? $$("[data-k]", m).filter(c => c.checked).map(c => rows[+c.dataset.k]) : rows;
+    if (!pick.length) return toast("Pick at least one patient");
+    m.close(true); const pg = progress(`Resetting ${pick.length} file${pick.length > 1 ? "s" : ""}`);
+    try {
+      const unitDir = await S.store.unitDir(u, true), pdir = await S.store.patientsDir();
+      let i = 0;
+      for (const { p, b } of pick) {
+        pg.set(`${p.name} (${++i} of ${pick.length})`, i / pick.length);
+        if (b) { await S.store.write(unitDir, b.e.name.slice(u.length + 3), await (await b.e.h.getFile()).arrayBuffer()); await orig.removeEntry(b.e.name); }
+        try { await pdir.removeEntry(p.id + ".json"); } catch {}
+        S.pts = S.pts.filter(x => x !== p); SV.good.delete(p.id);
       }
-    }
-    const pdir = await S.store.patientsDir();
-    for (const pt of S.pts.filter(p => p.unit === u && active(p))) { try { await pdir.removeEntry(pt.id + ".json"); } catch {} }
-    S.pts = S.pts.filter(p => !(p.unit === u && active(p)));
-  } finally { pg.close(); }
-  route(); await importNotes();
+    } finally { pg.close(); }
+    route(); await importNotes();
+  };
 }
 
 // ---------------- patient view ----------------
@@ -663,7 +795,7 @@ const worst = fs => fs.some(f => f.level === "red") ? "red" : fs.some(f => f.lev
 function probPara(pt, p, kind, fs) {
   const open = kind === "hpi" ? p.hpiOpen : p.planOpen;
   const ent = entriesHtml(kind === "hpi" ? p.hpi : p.plan, S.date);
-  const lv = worst(fs.filter(f => f.problemId === p.id));
+  const lv = worst(fs.filter(f => f.problemId === p.id && f.level !== "done")) || (fs.some(f => f.problemId === p.id && f.level === "done") ? "done" : "");
   return `<span class="dxn ${lv ? "u-" + lv : ""}">${esc(p.name)}</span>: ${open ? esc(open.replace(/\.?$/, ".")) + " " : ""}${ent}`;
 }
 // Which paragraph each flag belongs to.
@@ -683,17 +815,17 @@ function ptView(id) {
   const n = E.render(pt, date);
   const loudF = loud(fs);
   // margin comments
-  const cm = ro ? [] : fs.filter(f => !/^Exam (changed by|not template)/.test(f.text)).map((f, i) => ({ id: "c" + i, f, at: anchorFor(pt, f, live) }));
+  const doneF = ro ? [] : (pt.addrLog || []).filter(a => a.date === S.today && !fs.some(f => f.text === a.text)).map(a => ({ level: "done", text: a.text, problemId: a.problemId, by: a.by }));
+  const cm = ro ? [] : [...fs.filter(f => !/^Exam (changed by|not template)/.test(f.text)), ...doneF].map((f, i) => ({ id: "c" + i, f, at: anchorFor(pt, f, live) }));
+  const fsU = [...fs, ...doneF];
   Object.keys(peOver).forEach(k => cm.push({ id: "pe-" + k, f: { level: "soft", text: peBy[k] ? `Exam line changed by ${peBy[k]}. Reverts when it resolves.` : "Exam line isn't the template." }, at: "pe-" + k }));
   const ccls = id => cm.filter(c => c.at === id).map(c => c.id).join(" ");
   const pp = (id, cls, attrs, inner) => `<div class="pp ${cls}" id="${id}" ${attrs} data-c="${ccls(id)}">${inner}</div>`;
   $("#main").innerHTML = `<div class="ptwrap">
     <nav class="side">${unitPts(pt.unit).map(p => { const c = loud(flagsFor(p)); const r = c.filter(f => f.level === "red").length;
       const qn = (p.notes || []).some(n => n.kind === "quick" && !n.done);
-      return `<a href="#pt-${p.id}" class="${p.id === id ? "on" : ""}"><span>${esc(p.name)}${qn ? ` <i class="d q" title="Note to write up"></i>` : ""}</span>${p.status === "admit" ? `<small class="ok">ADMIT</small>` : c.length ? `<span class="pill ${r ? "r" : "a"}">${c.length}</span>` : `<small class="ok">ready</small>`}</a>`; }).join("")}</nav>
+      return `<a href="#pt-${p.id}" class="${p.id === id ? "on" : ""}"><span>${esc(p.name)}${admA(p)}${qnTag(p)}</span>${c.length ? `<span class="pill ${r ? "r" : "a"}">${c.length}</span>` : `<small class="ok">ready</small>`}</a>`; }).join("")}</nav>
     <div style="min-width:0">
-      ${ro ? "" : `<div class="alerts" data-help="alerts">${loudF.map(f => { const at = anchorFor(pt, f, live);
-        return `<div class="al ${f.level}"><span>${esc(f.text)}</span><span class="sp"></span>${at !== "noteTop" ? `<button class="btn sm" data-goto="${at}">${ic("goto", 13)} Go to</button>` : `<button class="btn sm" data-addr="${esc(f.text)}">Addressed</button>`}</div>`; }).join("")}</div>`}
       ${ro ? `<div class="al amber" style="margin-bottom:10px">Old version: how this note read on ${md(S.viewDate)}. Read only.<span class="sp"></span><button class="btn sm" id="reprint">${ic("print", 13)} Print this version</button><button class="btn sm" id="backNow">Back to current</button></div>`
         : lastDate(pt) > S.today ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Prepped for ${md(lastDate(pt))}.<span class="sp"></span><button class="btn sm" id="unprepP">Unprep</button></div>` : ""}
       ${ro ? "" : `<div class="tools" data-help="tools">
@@ -704,9 +836,9 @@ function ptView(id) {
         <button class="btn ic" id="reprint">${ic("print")}<span>Print</span></button>
         <div class="more"><button class="btn ic" id="moreB" title="More">${ic("more")}<span>More</span></button>
           <div class="menu" id="moreM" hidden>
-            <button data-m="vit">${ic("vitals")} Vitals</button><button data-m="info">${ic("user")} Patient info &amp; history blurb</button><button data-m="psy">${ic("psych")} Psych / primary diagnosis line</button>
+            <button data-m="vit">${ic("vitals")} Vitals</button><button data-m="pe">${ic("user")} Physical exam</button><button data-m="info">${ic("user")} Patient info &amp; history blurb</button><button data-m="psy">${ic("psych")} Psych / primary diagnosis line</button>
             ${pt.status === "admit" ? `<button data-m="hp">${ic("hp")} Edit H&amp;P form</button>` : ""}
-            <button data-m="hist">${ic("history")} Who edited this note</button><button data-m="dc" class="warn">${ic("door")} Discharge</button></div></div></div>
+            <button data-m="hist">${ic("history")} Who edited this note</button>${pt.status === "discharged" ? `<button data-m="undc">${ic("door")} Undo discharge</button>` : `<button data-m="dc" class="warn">${ic("door")} Discharge</button>`}</div></div></div>
       ${stickyPanel(pt)}`}
       <div class="notewrap ${cm.length ? "has-c" : ""}">
       <div class="paper" id="paper" data-help="paper">
@@ -714,31 +846,36 @@ function ptView(id) {
         <div class="ttl">${pt.status === "admit" ? "HISTORY AND PHYSICAL EXAMINATION" : "MEDICAL PROGRESS NOTE:"}</div>
         <div class="box">CHIEF COMPLAINT/HISTORY OF PRESENT ILLNESS:</div>
         <div class="pp click" data-edit="blurb">${esc(pt.blurb) || `<span class="muted">Add the patient history blurb…</span>`}</div>
-        ${live.filter(p => !p.planOnly).map(p => pp(`h-${p.id}`, "click", `data-prob="${p.id}"`, probPara(pt, p, "hpi", fs)) + `<div data-slot="${p.id}"></div>`).join("") ||
+        ${live.filter(p => !p.planOnly).map(p => pp(`h-${p.id}`, "click", `data-prob="${p.id}"`, probPara(pt, p, "hpi", fsU)) + `<div data-slot="${p.id}"></div>`).join("") ||
           `<ul class="dash"><li>${md(date)}: Patient reports no medical or physical concerns today.</li></ul>`}
         <div class="boxed"><div class="bl">RESOLVED HPI:</div><div class="bc">${n.resolvedHpi.map(esc).join("<br>")}</div></div>
         <div class="box">REVIEW OF SYSTEMS: <em>Systems were reviewed and normal, except as noted in the HPI.</em></div>
         <div class="box">PHYSICAL EXAMINATION:</div>
         <table class="vs pp click" data-edit="vitals"><tr><th>BP</th><th>Pulse</th><th>RR</th><th>Temp</th><th>O2 Sat</th><th>BG</th></tr>
           <tr><td>${esc(v.bp || "—")}</td><td>${esc(v.hr || "—")}</td><td>${esc(v.rr || "—")}</td><td>${esc(v.temp || "—")}</td><td>${esc(v.o2 || "—")}</td><td>${esc(v.bg || "N/A")}</td></tr></table>
-        <div class="pl">${PE_LINES.map(([k, d]) => peOver[k] ? `<div class="pp" id="pe-${k}" data-c="${ccls("pe-" + k)}"><span class="u-soft">${k}: ${esc(peOver[k])}</span></div>` : `<div>${k}: ${esc(d)}</div>`).join("")}</div>
+        <div class="pl pp click" data-edit="pe">${PE_LINES.map(([k, d]) => peOver[k] ? `<div class="pp" id="pe-${k}" data-c="${ccls("pe-" + k)}"><span class="u-soft">${k}: ${esc(peOver[k])}</span></div>` : `<div>${k}: ${esc(d)}</div>`).join("")}</div>
         <div class="box">LABORATORY DATA:</div>
         ${pp("labsPara", "click", `data-edit="labs"`, (pt.labs || []).length ? pt.labs.map(l => `${esc(l.text)}${(l.bullets || []).map(b => `<br>&nbsp;&nbsp;- ${esc(b)}`).join("")}`).join("<br>") : "All Labs Pending")}
         <div class="box">ASSESSMENT/PLAN:</div>
         <div class="pp">Diet is regular.<br>Activity is as tolerated.</div>
         <div class="pp click" data-edit="psych">${n.plan[0] && pt.psych?.dx ? esc(n.plan[0]).replace(/\n/g, "<br>") : `<span class="muted">Add the primary (psych) diagnosis…</span>`}</div>
         ${live.filter(p => p.planOnly).map(p => `<div data-slot="${p.id}"></div>`).join("")}
-        ${live.filter(p => !p.hpiOnly).map(p => pp(`p-${p.id}`, "click", `data-prob="${p.id}"`, probPara(pt, p, "plan", fs))).join("")}
+        ${live.filter(p => !p.hpiOnly).map(p => pp(`p-${p.id}`, "click", `data-prob="${p.id}"`, probPara(pt, p, "plan", fsU))).join("")}
         <div class="boxed"><div class="bl">RESOLVED PLAN:</div><div class="bc">${n.resolvedPlan.map(esc).join("<br>")}</div></div>
         <div class="box">FOLLOW UP WITH PRIMARY CARE PROVIDER FOR THE FOLLOWING:</div>
         <div class="pp">- ${esc([...n.pcp, ...(pt.pcpExtra || [])].join(", ") || "N/A")}</div>
       </div>
-      ${cm.length ? `<aside class="comments" id="cmts" data-help="comments">${cm.map(c => `<div class="cmt ${c.f.level}" id="${c.id}" data-at="${c.at}">
+      ${cm.length || loudF.length ? `<aside class="comments" id="cmts" data-help="comments">
+        ${loudF.length ? `<div class="glance" data-help="alerts"><div class="gh">${ic("flag", 14)} Needs attention <span class="gn">${loudF.length}</span></div>
+          ${loudF.map((f, i) => { const at = anchorFor(pt, f, live); return `<div class="gi ${f.level} ${i > 2 ? "more" : ""}"><span>${esc(f.text)}</span>${at !== "noteTop" ? `<button class="btn sm" data-goto="${at}">${ic("goto", 12)} Go to</button>` : `<button class="btn sm" data-addr="${esc(f.text)}">${ic("check", 12)}</button>`}</div>`; }).join("")}
+          ${loudF.length > 3 ? `<button class="gmore" id="gMore">+${loudF.length - 3} more</button>` : ""}</div>` : ""}
+        <div class="cmtlayer">${cm.map(c => `<div class="cmt ${c.f.level}" id="${c.id}" data-at="${c.at}">
         <div class="ct">${esc(c.f.text)}</div>
-        ${c.f.level === "red" || c.f.level === "amber" ? `<div class="ca">${c.f.text.startsWith("Uncommon: ") ? `<button class="btn sm" data-routine="${esc(c.f.text.slice(10))}">Mark routine</button><button class="btn sm" data-always="${esc(c.f.text.slice(10))}">Always flag</button>` : ""}<button class="btn sm" data-addr="${esc(c.f.text)}">${ic("check", 12)} Addressed</button></div>` : ""}</div>`).join("")}</aside>` : ""}
+        ${c.f.level === "red" || c.f.level === "amber" ? `<div class="ca">${c.f.text.startsWith("Uncommon: ") ? `<button class="btn sm" data-routine="${esc(c.f.text.slice(10))}">Mark routine</button><button class="btn sm" data-always="${esc(c.f.text.slice(10))}">Always flag</button>` : ""}<button class="btn sm" data-addr="${esc(c.f.text)}">${ic("check", 12)} Addressed</button></div>` : c.f.level === "done" ? `<div class="cd">${ic("check", 11)} Addressed${c.f.by ? " by " + esc(c.f.by) : ""}</div>` : ""}</div>`).join("")}</div></aside>` : ""}
       </div>
     </div></div>`;
   layoutComments();
+  $("#gMore")?.addEventListener("click", e => { const g = e.target.closest(".glance"); g.classList.toggle("open"); e.target.textContent = g.classList.contains("open") ? "Show less" : `+${loudF.length - 3} more`; layoutComments(); });
   // hover link between a paragraph and its comments
   $$("[data-c]").forEach(el => { const ids = (el.dataset.c || "").split(" ").filter(Boolean); if (!ids.length) return;
     el.addEventListener("mouseenter", () => ids.forEach(i => $("#" + i)?.classList.add("hot"))); el.addEventListener("mouseleave", () => ids.forEach(i => $("#" + i)?.classList.remove("hot"))); });
@@ -756,39 +893,62 @@ function ptView(id) {
   $('[data-edit="vitals"]')?.addEventListener("click", () => vitalsModal(pt.unit, pt.id));
   $('[data-edit="labs"]')?.addEventListener("click", () => labsModal(pt));
   $('[data-edit="psych"]')?.addEventListener("click", () => psychModal(pt));
+  $('[data-edit="pe"]')?.addEventListener("click", () => peModal(pt));
   $("#addP")?.addEventListener("click", () => addProblem(pt));
   $("#stk")?.addEventListener("click", () => stickyModal([pt]));
   $("#labs")?.addEventListener("click", () => labsModal(pt));
   $("#reprint")?.addEventListener("click", () => reprintModal(pt));
   $("#moreB")?.addEventListener("click", e => { e.stopPropagation(); const m = $("#moreM"); m.hidden = !m.hidden; if (!m.hidden) setTimeout(() => document.addEventListener("click", () => { m.hidden = true; }, { once: true })); });
   $$("[data-m]").forEach(b => b.onclick = () => { const k = b.dataset.m;
-    if (k === "vit") vitalsModal(pt.unit, pt.id); if (k === "info") infoModal(pt); if (k === "psy") psychModal(pt); if (k === "hp") location.hash = "hp-" + pt.id; if (k === "dc") discharge(pt);
+    if (k === "vit") vitalsModal(pt.unit, pt.id); if (k === "pe") peModal(pt); if (k === "undc") undischarge(pt); if (k === "info") infoModal(pt); if (k === "psy") psychModal(pt); if (k === "hp") location.hash = "hp-" + pt.id; if (k === "dc") discharge(pt);
     if (k === "hist") modal("Who edited this note", `<table class="ovt zebra"><tr><th>When</th><th>Who</th><th>What</th></tr>${(pt.log || []).slice().reverse().slice(0, 60).map(l => `<tr><td>${new Date(l.at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td><b>${esc(l.by)}</b></td><td>${esc(l.what)}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">No edits recorded yet.</td></tr>`}</table>`); });
   $("#unprepP")?.addEventListener("click", e => busy(e.currentTarget, async () => { if (await ask("Unprep this note?", `Removes what was added for ${md(lastDate(pt))} so it goes back to today (${md(S.today)}).`, "Unprep")) { await unprep(pt); route(); } }));
   $("#backNow")?.addEventListener("click", () => { S.viewDate = null; route(); });
   if (S.open) openEditor(pt, S.open);
 }
+function peModal(pt) {
+  const live = pt.problems.filter(p => p.start <= S.date && !(p.resolved && p.resolved < S.date));
+  const byDx = Object.fromEntries(live.filter(p => p.peLine).map(p => [p.peLine.key, p]));
+  const cur = pt.peExtra || {};
+  const m = modal(`${ic("user")} Physical exam`, PE_LINES.map(([k, d]) => byDx[k]
+      ? `<div class="f"><span>${k}</span><div class="muted" style="font-size:13px">${esc(byDx[k].peLine.text)} <i>(set by ${esc(byDx[k].name)}; change it in that diagnosis)</i></div></div>`
+      : `<div class="f"><span class="lrow">${k}<span class="sp"></span><button class="iconbtn" data-rs="${k}" title="Back to the template">${ic("history", 13)}</button></span><input data-pe="${k}" value="${esc(cur[k] || d)}"></div>`).join(""),
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="peGo">Save exam</button>`);
+  $$("[data-rs]", m).forEach(b => b.onclick = () => { const k = b.dataset.rs; $(`[data-pe="${k}"]`, m).value = PE_LINES.find(x => x[0] === k)[1]; m.dirty = true; });
+  $("#peGo", m).onclick = async () => {
+    const ex = {}; $$("[data-pe]", m).forEach(i => { const d = PE_LINES.find(x => x[0] === i.dataset.pe)[1]; if (i.value.trim() && i.value.trim() !== d) ex[i.dataset.pe] = i.value.trim(); });
+    pt.peExtra = ex; m.close(true); await saveNow(pt, { why: "Edited physical exam" }); route();
+  };
+}
+async function undischarge(pt) {
+  if (!(await ask("Undo discharge?", `${esc(pt.name)} goes back on ${pt.unit}'s list and their note moves back out of the discharge folder.`, "Undo discharge"))) return;
+  try { const u = await S.store.unitDir(pt.unit, true), dc = await S.store.subDir(u, "discharge"); if (await S.store.exists(dc, `${pt.file}.docx`)) await S.store.move(dc, `${pt.file}.docx`, u); } catch (e) { console.warn(e); }
+  pt.status = "active"; delete pt.dischargedOn; await saveNow(pt, { why: "Undid discharge" }); route();
+}
 // Line each margin comment up with its paragraph (wide screens); stack them under the note otherwise.
 function layoutComments() {
-  const box = $("#cmts"), paper = $("#paper"); if (!box || !paper) return;
+  const box = $("#cmts"), paper = $("#paper"), layer = $(".cmtlayer"); if (!box || !paper || !layer) return;
   const wide = window.innerWidth >= 1150; box.classList.toggle("stacked", !wide);
-  if (!wide) { $$(".cmt", box).forEach(c => c.style.top = ""); box.style.height = ""; return; }
-  let y = 0;
-  for (const c of $$(".cmt", box)) {
-    const a = $("#" + c.dataset.at); const top = a ? a.getBoundingClientRect().top - paper.getBoundingClientRect().top : 0;
+  if (!wide) { $$(".cmt", box).forEach(c => c.style.top = ""); layer.style.height = ""; return; }
+  let y = 0; const off = layer.getBoundingClientRect().top;
+  const at = c => { const a = $("#" + c.dataset.at); return a ? a.getBoundingClientRect().top - off : 0; };
+  const list = $$(".cmt", box).map((c, i) => ({ c, i, t: at(c) })).sort((a, b) => a.t - b.t || a.i - b.i);
+  for (const { c } of list) {
+    const a = $("#" + c.dataset.at); const top = a ? a.getBoundingClientRect().top - off : 0;
     const t = Math.max(top, y); c.style.top = t + "px"; y = t + c.offsetHeight + 8;
   }
-  box.style.height = Math.max(y, paper.offsetHeight) + "px";
+  layer.style.height = y + "px";
 }
 window.addEventListener("resize", () => layoutComments());
 async function address(pt, text) {
   const f = flagsFor(pt).find(x => x.text === text);
+  (pt.addrLog ||= []).push({ date: S.today, text, problemId: f?.problemId || null, level: f?.level, by: S.user?.name });
   const p = f?.problemId && pt.problems.find(q => q.id === f.problemId);
   const med = p && p.meds.find(m => text.startsWith(m.name) && m.end);
   if (med) med.addressed = true;
   else if (p && /course ended|last dose today/.test(text)) p.courseAddressed = true;
   else ((pt.addressed ||= {})[S.today] ||= []).push(text);
-  await saveNow(pt); route();
+  await saveNow(pt, { why: `Addressed: ${text}` }); route();
 }
 async function setRule(name, rule) {
   if (!isSup()) return suggest({ type: "dx", dx: name, change: rule, note: rule.routine ? "Mark routine" : "Always flag" });
@@ -863,7 +1023,7 @@ function refreshParas(pt, p) {
   if (pl) pl.innerHTML = probPara(pt, p, "plan", fs);
 }
 function syncPlan(pt, p) {
-  if (p.start === S.date) { p.planOpen = E.planOpening(p); return; }
+  if (p.start === S.date) { if (!p.planOpen || p.planOpen === p.planAuto || p.planOpen === "Will continue to monitor") p.planOpen = p.planAuto = E.planOpening(p); return; }
   const e = todayEntry(pt, p, "plan");
   if (e.text === e.auto) { e.text = e.auto = dPlan(pt, p, S.date); }
 }
@@ -908,13 +1068,12 @@ function openEditor(pt, pid) {
       <div><label>Symptom word (for "reports ___ managed well")</label><input id="eSym" value="${esc(p.symptom || "")}" placeholder="e.g. acid reflux"></div></div>
     <label>HPI ${md(S.date)}${firstDay && !p.hpiOpen ? " (first day: what the patient reports)" : ""}</label>
     <textarea id="eH">${esc(hE.text)}</textarea>
-    <label>${firstDay ? "Plan (first day)" : "Plan " + md(S.date)}</label>
+    <label class="lrow">${firstDay ? "Plan (first day)" : "Plan " + md(S.date)}<span class="sp"></span><button class="iconbtn" id="eReset" title="Reset HPI and plan to the suggested wording">${ic("history", 15)}</button></label>
     <textarea id="eP">${esc(firstDay ? (p.planOpen || E.planOpening(p)) : pE.text)}</textarea>
-    <div class="row" style="margin-top:6px"><button class="btn sm" id="eReset">Reset to suggested wording</button>
-      <span class="muted">Auto number:</span><select id="eVit" style="width:auto">${["", "bp", "hr", "bg"].map(k => `<option value="${k}" ${p.autoVital === k || (!p.autoVital && !k) ? "selected" : ""}>${k ? k.toUpperCase() : "none"}</option>`).join("")}</select></div>
-    <label>Medications</label>
-    <div class="meds" id="eMeds">${meds.map(m => medRow(pt, p, m)).join("")}</div>
-    <button class="btn sm" id="eAdd" style="margin-top:6px">+ Add medication</button>
+    <div class="meds" id="eMeds" style="margin-top:8px">${meds.map(m => medRow(pt, p, m)).join("")}</div>
+    <button class="btn sm" id="eAdd" style="margin-top:6px">${ic("plus", 13)} Add medication</button>
+    <div class="row" style="margin-top:10px"><label class="switch"><input type="checkbox" id="eVitOn" ${p.autoVital ? "checked" : ""}><i></i>Record vitals every day</label>
+      <select id="eVit" class="btn sm" ${p.autoVital ? "" : "hidden"}>${[["bp", "Blood pressure"], ["hr", "Heart rate"], ["bg", "Blood glucose"]].map(([k, n]) => `<option value="${k}" ${p.autoVital === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
     <label>Options</label>
     <div class="row">
       ${isDiabetes(p.name) ? `<span class="muted">Taking insulin?</span><span class="chip ${onInsulin(p) === true ? "on" : ""}" data-o="insY">Yes</span><span class="chip ${onInsulin(p) === false ? "on" : ""}" data-o="insN">No</span><span class="muted">·</span>` : ""}
@@ -934,12 +1093,15 @@ function openEditor(pt, pid) {
   $("#eSym", ed).oninput = e => { p.symptom = e.target.value; const t = todayEntry(pt, p, "hpi"); if (t.text === t.auto && !firstDay) { t.text = t.auto = dHpi(pt, p, S.date); $("#eH", ed).value = t.text; } changed(); };
   $("#eH", ed).oninput = e => { hE.text = e.target.value; changed(); };
   $("#eP", ed).oninput = e => { if (firstDay) p.planOpen = e.target.value; else pE.text = e.target.value; changed(); };
-  $("#eVit", ed).onchange = e => { p.autoVital = e.target.value || undefined; $("#eReset", ed).click(); };
-  $("#eReset", ed).onclick = () => {
+  const resetWording = () => {
     if (!(firstDay && !p.hpiOpen)) { hE.text = hE.auto = dHpi(pt, p, S.date); $("#eH", ed).value = hE.text; }
     if (firstDay) { p.planOpen = E.planOpening(p); $("#eP", ed).value = p.planOpen; } else { pE.text = pE.auto = dPlan(pt, p, S.date); $("#eP", ed).value = pE.text; }
     changed();
   };
+  $("#eReset", ed).onclick = async () => { if (await ask("Reset wording?", "Replaces today's HPI and plan text for this diagnosis with the suggested wording. Your typed changes to them will be lost.", "Reset")) resetWording(); };
+  const vitOn = () => { $("#eVit", ed).hidden = !$("#eVitOn", ed).checked; p.autoVital = $("#eVitOn", ed).checked ? $("#eVit", ed).value : undefined; resetWording(); };
+  $("#eVitOn", ed).onchange = vitOn; $("#eVit", ed).onchange = vitOn;
+  /* reset handler end */
   const wireMed = row => {
     const m = p.meds.find(x => x.id === row.dataset.med);
     $$("input[data-k]", row).forEach(inp => inp.oninput = () => {
@@ -1003,8 +1165,9 @@ function addProblem(pt) {
     <div class="f"><span>Diagnosis</span><input id="nN" list="dxList" autocomplete="off" placeholder="e.g. Cellulitis, left forearm"><datalist id="dxList">${known.map(k => `<option value="${esc(k)}">`).join("")}</datalist></div>
     <p class="warnbox" id="nDup" hidden></p>
     <div class="f"><span>What the patient reports today</span><textarea id="nH" rows="3" placeholder="Patient presents with…"></textarea></div>
+    <div class="f"><span>Plan</span><textarea id="nP" rows="2" placeholder="Will treat with… (or leave blank: Will continue to monitor)"></textarea></div>
     <div class="f"><span>Symptom word</span><input id="nS" placeholder="e.g. cellulitis"></div>
-    <p class="muted">Medications go in the next step. The first HPI entry is dated ${md(S.date)}.</p>`,
+    <p class="muted">Add medications right after saving. The first entry is dated ${md(S.date)}.</p>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="nGo">Save diagnosis</button>`);
   const norm = x => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const dupOf = name => { const a = norm(name); return a.length > 2 && cur.find(q => { const b = norm(q.name); return b === a || b.includes(a) || a.includes(b); }); };
@@ -1015,7 +1178,7 @@ function addProblem(pt) {
     const name = $("#nN", m).value.trim(); if (!name) return;
     const d = dupOf(name); if (d && !(await ask("Add a second one?", `<b>${esc(d.name)}</b> is already on this note.`, "Add anyway", "Go back"))) return;
     const tr = rulebook()[name] || {};
-    const p = { id: uid(), name, symptom: $("#nS", m).value.trim() || name.toLowerCase(), autoVital: tr.autoVital, start: S.date, hpiOpen: null, planOpen: "Will continue to monitor", meds: [],
+    const p = { id: uid(), name, symptom: $("#nS", m).value.trim() || name.toLowerCase(), autoVital: tr.autoVital, start: S.date, hpiOpen: null, planOpen: $("#nP", m).value.trim() || "Will continue to monitor", meds: [],
       hpi: [{ date: S.date, text: $("#nH", m).value.trim(), auto: "" }], plan: [] };
     pt.problems.push(p); m.close(true); await saveNow(pt, { why: `Added ${name}` }); S.open = p.id; route();
   };
@@ -1047,24 +1210,19 @@ function psychModal(pt) {
 }
 function labsModal(pt) {
   pt.labs ||= []; pt.pendingLabs ||= [];
-  const planPending = pt.problems.filter(q => !(q.resolved && q.resolved < S.today)).flatMap(q => {
-    const last = [...q.plan].sort((a, b) => a.date < b.date ? -1 : 1).pop();
-    const seg = last?.text.split(/[,;.]/).find(x => /\bpending\b/i.test(x));
-    return seg ? [{ name: seg.replace(/\s*(?:still\s+)?pending.*$/i, "").replace(/^\s*(?:and|cont\.?)\s+/i, "").trim(), dx: q.name }] : [];
-  });
-  const pend = [...pt.pendingLabs.map(n => ({ name: n })), ...planPending];
+  const pend = pendingLabs(pt);
   const m = modal(`${ic("labs")} Labs`, `
-    ${pend.length ? `<div class="lbl" style="margin-top:0">Waiting on</div><div class="row">${pend.map(x => `<span class="fpill a">${esc(x.name)} pending${x.dx ? ` · ${esc(x.dx)}` : ""}</span>`).join("")}</div>` : ""}
+    <div class="lbl" style="margin-top:0">Waiting on</div><div class="row">${pend.map(x => `<button class="fpill a" data-fill="${esc(x.name)}" title="Add this result">${esc(x.name)} pending${x.dx ? ` · ${esc(x.dx)}` : ""}</button>`).join("") || `<span class="muted small">Nothing. Writing "will order CMP" or "TSH pending" in a plan adds it here.</span>`}</div>
     <div class="lbl">Already in the note</div>
     <div id="lList">${pt.labs.map((l, i) => `<div class="card" style="padding:9px 10px;margin-bottom:6px;box-shadow:none"><div class="row"><b style="flex:1">${esc(l.text)}</b><button class="btn sm warn" data-rm="${i}">Remove</button></div>${(l.bullets || []).map(b => `<div class="muted">- ${esc(b)}</div>`).join("")}</div>`).join("") || `<p class="muted">No results yet (prints "All Labs Pending").</p>`}</div>
     <div class="lbl">Add a result</div>
     <div class="f"><span>Line</span><input id="lT" placeholder="CMP reviewed ${md(S.today)}."></div>
     <div class="f"><span>Abnormal values (one per line, become bullets)</span><textarea id="lB" rows="3" placeholder="Potassium 5.6 (H)"></textarea></div>
-    <div class="f"><span>Ordered, waiting on (one per line, flagged until the result is added)</span><textarea id="lP" rows="2" placeholder="CMP">${esc(pt.pendingLabs.join("\n"))}</textarea></div>
     ${pt.problems.length ? `<p class="warnbox">Abnormal results can add or change a diagnosis. On this note: ${pt.problems.filter(p => !p.resolved).map(p => esc(p.name)).join(", ")}.</p>` : ""}`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="lGo">Save labs</button>`);
   $$("[data-rm]", m).forEach(b => b.onclick = async () => { pt.labs.splice(+b.dataset.rm, 1); m.close(true); await saveNow(pt, { why: "Removed a lab" }); labsModal(pt); route(); });
   const key = t => (String(t).match(/[A-Za-z][A-Za-z0-9-]+/) || [""])[0].toLowerCase();
+  $$("[data-fill]", m).forEach(b => b.onclick = () => { $("#lT", m).value = `${b.dataset.fill} reviewed ${md(S.today)}.`; $("#lB", m).focus(); m.dirty = true; });
   $("#lGo", m).onclick = async () => {
     const t = $("#lT", m).value.trim();
     if (t) {
@@ -1072,9 +1230,7 @@ function labsModal(pt) {
       if (dup && !(await ask("Already in the note?", `<b>${esc(dup.text)}</b> is already listed. Add <b>${esc(t)}</b> too?`, "Add it anyway", "Go back"))) return;
       pt.labs.push({ date: S.today, text: t, bullets: $("#lB", m).value.split("\n").map(s => s.trim()).filter(Boolean) });
     }
-    let p2 = $("#lP", m).value.split("\n").map(s => s.trim()).filter(Boolean);
-    if (t) p2 = p2.filter(x => key(x) !== key(t));            // a result arrived: it's no longer pending
-    pt.pendingLabs = p2;
+    if (t) pt.pendingLabs = (pt.pendingLabs || []).filter(x => !t.toLowerCase().includes(x.toLowerCase()));
     m.close(true); await saveNow(pt, { why: "Edited labs" }); route();
   };
 }
@@ -1098,7 +1254,7 @@ async function discharge(pt) {
       await S.store.move(dir, name, to);
     } catch (e) { toast("Couldn't move the Word file: " + e.message); }
     pt.status = "discharged"; pt.dischargedOn = S.today; await S.store.savePatient(pt, true);
-    m.close(); toast(`${pt.name} discharged`); location.hash = `unit-${pt.unit}`;
+    m.close(true); toast(`${pt.name} discharged`); location.hash = `unit-${pt.unit}`;
   });
 }
 
@@ -1156,7 +1312,7 @@ async function prepUnit(u) {
       <button class="btn sm" data-open="${pt.id}" style="margin-top:6px">Edit</button></div></div>`).join("")).join("")}` : `<p class="muted" style="margin-top:8px">Nothing needs review.</p>`}`,
     `<button class="btn p" data-x>Approve all</button>`);
   $(".mb", m).insertAdjacentHTML("afterbegin", `<p class="muted" style="margin-bottom:6px">Notes now show what they'll say on <b>${md(tomorrow)}</b>. Need to redo today? Use <b>Unprep</b> on the unit or the note.</p>`);
-  $$("[data-open]", m).forEach(b => b.onclick = () => { m.close(); location.hash = "pt-" + b.dataset.open; });
+  $$("[data-open]", m).forEach(b => b.onclick = () => { m.close(true); location.hash = "pt-" + b.dataset.open; });
   m.onclose = async () => { for (const { pt } of review) { pt.problems.forEach(p => p.needsReview = false); await S.store.savePatient(pt, true); } route(); };
 }
 
@@ -1187,7 +1343,7 @@ function printModal(list) {
   $$("[data-c]", m).forEach(c => c.onchange = upd); upd();
   $("#pGo", m).onclick = async () => {
     S.provider = $("#pP", m).value; m.close();
-    list.forEach(queueDocx);
+    list.forEach(pt => queueDocx(pt));
     printPdf(list.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider }))), `${list[0].unit} ${md(S.today).replace("/", "-")}.pdf`);
   };
 }
@@ -1205,36 +1361,34 @@ function hpForm(id) {
     <div class="row hpSug" style="margin-bottom:6px"></div>
     <div class="row"><label class="chip ${m.home !== false && m.name ? "on" : ""}"><input type="checkbox" data-f="home" ${m.home !== false ? "checked" : ""} hidden>Home med</label><label class="chip"><input type="checkbox" data-f="prn" ${m.prn ? "checked" : ""}> PRN</label><span class="sp"></span><button class="btn sm warn" data-rmp>Remove</button></div></div>`; };
   $("#main").innerHTML = `<div class="row" style="margin-bottom:10px"><h1>${pt ? "Edit H&amp;P" : "New H&amp;P"}</h1><span class="sp"></span><a class="btn" href="${pt ? "#pt-" + pt.id : "#home"}" style="text-decoration:none">Cancel</a><button class="btn p" id="hSave">Save H&amp;P</button></div>
-    <div class="card" style="padding:16px">
-      <div class="grid2">
-        <div class="f"><span>Name (Last, First)</span><input id="hN" value="${esc(pt?.name || "")}"></div>
+    <div class="hpsec card"><div class="hph">${ic("user", 16)} Patient</div>
+      <div class="grid3">
+        <div class="f span2"><span>Name (Last, First)</span><input id="hN" value="${esc(pt?.name || "")}"></div>
         <div class="f"><span>Unit</span><select id="hU">${UNITS.map(u => `<option ${pt?.unit === u ? "selected" : ""}>${u}</option>`).join("")}</select></div>
         <div class="f"><span>Date of birth</span><input id="hD" value="${esc(pt?.dob || "")}" placeholder="MM/DD/YYYY"></div>
-        <div class="f"><span>MRN (no zeros)</span><input id="hM" value="${esc(pt?.mrn || "")}"></div>
-        <div class="f"><span>Admit date</span><input type="date" id="hA" value="${pt?.admitDate || S.today}"></div>
-        <div class="f"><span>Admit time (hours)</span><input id="hT" value="${esc(pt?.admitTime || "")}" placeholder="2215"></div>
         <div class="f"><span>Age</span><input id="hAge" value="${esc(pt?.age || "")}" inputmode="numeric"></div>
         <div class="f"><span>Sex</span><select id="hSex">${["female", "male"].map(s => `<option ${pt?.sex === s ? "selected" : ""}>${s}</option>`).join("")}</select></div>
-      </div>
-      <p class="muted" id="hAdol"></p>
-      <div class="f"><span>Chief complaint (#1)</span><input id="hCC" value="${esc(h.cc || "")}"></div>
-      <div class="f"><span>Primary / admitting diagnosis (from HCS)</span><input id="hDx" value="${esc(pt?.psych?.dx || "")}"></div>
-      <div class="f"><span>Taper (from HCS)</span><select id="hTap">${Object.entries({ safety: "Q15 safety checks only", ciwa: "CIWA / Valium", cows: "COWS / Subutex", both: "CIWA and COWS" }).map(([k, n]) => `<option value="${k}" ${pt?.psych?.taper === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
-      <div class="lbl">Diagnoses (indications)</div>
-      <div id="hProbs">${probs.map(probRow).join("")}</div>
-      <button class="btn sm" id="hAddP">+ Add diagnosis</button>
-      <div class="grid2" style="margin-top:12px">
+        <div class="f"><span>MRN (no zeros)</span><input id="hM" value="${esc(pt?.mrn || "")}"></div>
+        <div class="f span2"><span>Admitted (date and time)</span><input type="datetime-local" id="hA" value="${pt?.admitDate || S.today}T${(pt?.admitTime || "").padStart(4, "0").replace(/^(\d\d)(\d\d)$/, "$1:$2") || "00:00"}"></div>
         <div class="f"><span>Allergies</span><input id="hAl" value="${esc(h.allergies || "NKA")}"></div>
         <div class="f"><span>Scribe</span><select id="hScr"><option value="">—</option>${scribes.map(s => `<option ${(h.scribe || S.user?.name) === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div>
-      </div>
+      </div><p class="muted small" id="hAdol"></p></div>
+    <div class="hpsec card"><div class="hph">${ic("psych", 16)} Admitting diagnosis</div>
+      <div class="grid3"><div class="f span2"><span>Primary / admitting diagnosis (from HCS)</span><input id="hDx" value="${esc(pt?.psych?.dx || "")}"></div>
+        <div class="f"><span>Taper (from HCS)</span><select id="hTap">${Object.entries({ safety: "Q15 safety checks only", ciwa: "CIWA / Valium", cows: "COWS / Subutex", both: "CIWA and COWS" }).map(([k, n]) => `<option value="${k}" ${pt?.psych?.taper === k ? "selected" : ""}>${n}</option>`).join("")}</select></div></div></div>
+    <div class="hpsec card"><div class="hph">${ic("labs", 16)} Medications &amp; history</div>
       <div class="f"><span>Home medications (one per line)</span><textarea id="hMeds" rows="3">${esc((h.meds || []).join("\n"))}</textarea></div>
       <div class="f"><span>Past surgical history</span><input id="hSurg" value="${esc(h.surgical || "No surgical history.")}"></div>
-      <div class="grid2"><div class="f"><span>Alcohol</span><input id="hAlc" value="${esc(h.alcohol || "Patient denies use.")}"></div><div class="f"><span>Nicotine</span><input id="hNic" value="${esc(h.nicotine || "Patient denies use.")}"></div>
-        <div class="f"><span>Illicit drugs</span><input id="hDr" value="${esc(h.drugs || "Patient denies use.")}"></div><div class="f"><span>General (objective description)</span><input id="hGen" value="${esc(h.general || "")}" placeholder="Patient appears stated age"></div></div>
-      <div class="lbl">Vitals</div>
-      <div class="grid2">${[["bp", "BP"], ["hr", "Pulse"], ["rr", "Resp"], ["temp", "Temp"], ["o2", "O2 %"], ["ht", "Height (in)"], ["wt", "Weight (lb)"]].map(([k, n]) => `<div class="f"><span>${n}</span><input data-v="${k}" value="${esc(v[k] || "")}"></div>`).join("")}</div>
-      <div class="f"><span>Labs (blank = All Labs Pending)</span><input id="hLab" value="${esc(pt?.labs?.[0]?.text || "")}"></div>
-    </div>`;
+      <div class="lbl">Social history</div>
+      <div class="grid3"><div class="f"><span>Alcohol</span><input id="hAlc" value="${esc(h.alcohol || "Patient denies use.")}"></div><div class="f"><span>Nicotine</span><input id="hNic" value="${esc(h.nicotine || "Patient denies use.")}"></div>
+        <div class="f"><span>Illicit drugs</span><input id="hDr" value="${esc(h.drugs || "Patient denies use.")}"></div></div></div>
+    <div class="hpsec card"><div class="hph">${ic("plus", 16)} Diagnoses &amp; labs <span class="muted small" style="font-weight:400">· every diagnosis is listed in the chief complaint</span></div>
+      <div id="hProbs">${probs.map(probRow).join("")}</div>
+      <button class="btn sm" id="hAddP">${ic("plus", 13)} Add diagnosis</button>
+      <div class="f" style="margin-top:12px"><span>Labs (blank = All Labs Pending)</span><input id="hLab" value="${esc(pt?.labs?.[0]?.text || "")}"></div></div>
+    <div class="hpsec card"><div class="hph">${ic("vitals", 16)} Exam &amp; vitals <span class="muted small" style="font-weight:400">· often filled in later</span></div>
+      <div class="f"><span>General (objective description)</span><input id="hGen" value="${esc(h.general || "")}" placeholder="Patient appears stated age"></div>
+      <div class="grid4">${[["bp", "BP"], ["hr", "Pulse"], ["rr", "Resp"], ["temp", "Temp"], ["o2", "O2 %"], ["ht", "Height (in)"], ["wt", "Weight (lb)"]].map(([k, n]) => `<div class="f"><span>${n}</span><input data-v="${k}" value="${esc(v[k] || "")}"></div>`).join("")}</div></div>`;
   S.formDirty = false; $("#main").addEventListener("input", () => { if (location.hash.startsWith("#hp-")) S.formDirty = true; });
   const adol = () => { const a = parseInt($("#hAge").value); $("#hAdol").textContent = a && a < 18 ? "Under 18: uses the adolescent GU/rectal line." : ""; };
   $("#hAge").oninput = adol; adol();
@@ -1247,12 +1401,12 @@ function hpForm(id) {
   $("#hAddP").onclick = () => { $("#hProbs").insertAdjacentHTML("beforeend", probRow()); wireRows(); };
   $("#hSave").onclick = e => busy(e.currentTarget, async () => {
     const name = $("#hN").value.trim(); if (!name) return toast("Add the patient's name");
-    const admit = $("#hA").value || S.today, age = parseInt($("#hAge").value) || "";
+    const adm = $("#hA").value || S.today, admit = adm.slice(0, 10), age = parseInt($("#hAge").value) || "";
     const rec = pt || { id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + uid(), status: "admit", problems: [], vitals: {}, times: {}, refusing: [], labs: [], pendingLabs: [] };
     const oldFile = pt ? `${pt.file} ADMIT.docx` : null;
-    Object.assign(rec, { name, file: name, unit: $("#hU").value, dob: $("#hD").value, mrn: $("#hM").value, admitDate: admit, admitTime: $("#hT").value,
+    Object.assign(rec, { name, file: name, unit: $("#hU").value, dob: $("#hD").value, mrn: $("#hM").value, admitDate: admit, admitTime: adm.slice(11, 16).replace(":", ""),
       age, sex: $("#hSex").value, adolescent: !!age && age < 18, psych: { dx: $("#hDx").value.trim(), taper: $("#hTap").value } });
-    rec.hp = { cc: $("#hCC").value, allergies: $("#hAl").value, scribe: $("#hScr").value, meds: $("#hMeds").value.split("\n").map(s => s.trim()).filter(Boolean),
+    rec.hp = { allergies: $("#hAl").value, scribe: $("#hScr").value, meds: $("#hMeds").value.split("\n").map(s => s.trim()).filter(Boolean),
       surgical: $("#hSurg").value, alcohol: $("#hAlc").value, nicotine: $("#hNic").value, drugs: $("#hDr").value, general: $("#hGen").value };
     rec.blurb = rec.blurb || `Patient is a ${age} year-old ${rec.sex} who admitted to Aspen Grove Behavioral Hospital for inpatient treatment due to ${rec.psych.dx}.`;
     const vv = {}; $$("[data-v]").forEach(i => { if (i.value.trim()) vv[i.dataset.v] = i.value.trim(); }); rec.vitals[admit] = vv;
@@ -1374,7 +1528,7 @@ const HELP = {
     [".list", "Patients", "Tap a name to open their note. Red and yellow text means something needs a look."],
   ],
   pt: [
-    [".alerts", "What needs attention", "Go to jumps to the paragraph it's about."],
+    [".glance", "Needs attention", "Everything flagged on this note. Go to jumps to the paragraph it's about. Long lists fold up under '+ more'."],
     ["#addP", "Add diagnosis", "Starts a new problem dated today. It warns you if it's already on the note."],
     ["#labs", "Add labs", "Shows what's pending and what's already in the note, so nothing gets entered twice."],
     ["#stk", "Add a note", "A quick note to write up later, or a note that stays with the patient."],
@@ -1413,8 +1567,9 @@ function endHelp() { $$(".hbub,.hbar").forEach(b => b.remove()); $$(".hring,.hsp
 function tour() {
   const items = helpItems(); if (!items.length) return toast("No tour for this page yet");
   document.body.classList.add("helping"); let i = 0;
-  const show = () => { const b = bubble(items[i], `<span class="muted">${i + 1} of ${items.length}</span><span class="sp"></span>${i ? `<button class="btn sm" data-h="b">Back</button>` : ""}<button class="btn sm p" data-h="n">${i < items.length - 1 ? "Next" : "Done"}</button>`);
-    $$("[data-h]", b).forEach(x => x.onclick = () => { if (x.dataset.h === "b") i--; else i++; if (i >= items.length) endHelp(); else show(); }); };
+  const show = () => { const b = bubble(items[i], `<span class="muted">${i + 1} of ${items.length}</span><span class="sp"></span><button class="btn sm" data-h="x">End tour</button>${i ? `<button class="btn sm" data-h="b">Back</button>` : ""}<button class="btn sm p" data-h="n">${i < items.length - 1 ? "Next" : "Done"}</button>`);
+    b.insertAdjacentHTML("afterbegin", `<button class="hclose" data-h="x" title="End tour">${ic("x", 14)}</button>`);
+    $$("[data-h]", b).forEach(x => x.onclick = () => { if (x.dataset.h === "x") return endHelp(); if (x.dataset.h === "b") i--; else i++; if (i >= items.length) endHelp(); else show(); }); };
   show();
 }
 let helpList = [];
@@ -1436,7 +1591,7 @@ window.addEventListener("hashchange", () => endHelp());
 
 // ---------------- supervisor & team rules ----------------
 const sha = async t => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("rn:" + t)))].map(b => b.toString(16).padStart(2, "0")).join("");
-const isSup = () => !!S.store?.demo || S.user?.role === "supervisor";
+const isSup = () => !!S.store?.demo || S.user?.role === "supervisor" || !!S.user?.admin;
 const users = () => S.settings.users || [];
 const providerNames = () => { const p = users().filter(u => u.role === "provider").map(u => u.name); return p.length ? p : PROVIDERS; };
 const scribeNames = () => users().filter(u => u.role !== "provider").map(u => u.name);
@@ -1447,8 +1602,8 @@ async function addUser(name, role) {
   (S.settings.users ||= []).push(u); await saveSettings(); return u;
 }
 async function setPin(u, pin) { u.pin = await pinHash(u, pin); u.mustReset = false; await saveSettings(); }
-function signIn(u) { S.user = { id: u.id, name: u.name, role: u.role }; try { sessionStorage.setItem("rn-user", u.id); } catch {} }
-function signOut() { S.user = null; S.site = null; try { sessionStorage.removeItem("rn-user"); sessionStorage.removeItem("rn-site"); } catch {} route(); }
+function signIn(u) { S.user = { id: u.id, name: u.name, role: u.role, admin: !!u.admin }; try { sessionStorage.setItem("rn-user", u.id); } catch {} }
+function signOut() { S.user = null; try { sessionStorage.removeItem("rn-user"); } catch {} route(); }
 function newPinModal(u, title = "Choose your own PIN") {
   return new Promise(res => {
     const m = modal(title, `<p class="muted">You're signed in with the starting PIN. Pick a new one (4+ digits) that only you know.</p>
@@ -1472,21 +1627,22 @@ function loginScreen() {
       <div class="f"><span>Your name (as it should show)</span><input id="sN" placeholder="e.g. B. Olsen"></div>
       <div class="f"><span>PIN (4+ digits)</span><input id="sP" type="password" inputmode="numeric"></div>
       <button class="btn p" id="sGo" style="width:100%;margin-top:6px">Create supervisor</button>`}
-    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--paperLine)" class="row"><button class="btn sm" id="lDemo">Try the demo instead</button><span class="sp"></span><button class="btn sm" id="lFold">Change team folder</button></div></div>`;
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--paperLine)" class="row"><button class="btn sm" id="lSite">${ic("hospital", 13)} ${S.site}</button><button class="btn sm" id="lDemo">Demo</button><span class="sp"></span><button class="btn sm" id="lFold">Change team folder</button></div></div>`;
   const go = async () => {
     const u = list.find(x => x.id === $("#lU").value);
     if (await pinHash(u, $("#lP").value) !== u.pin) { toast("Wrong PIN"); $("#lP").select(); return; }
     signIn(u); if (u.mustReset) await newPinModal(u);
-    await pickSite(true); location.hash = "home"; route();
+    location.hash = "home"; route();
   };
   $("#lGo")?.addEventListener("click", go);
   $("#lP")?.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
   setTimeout(() => $("#lP")?.focus(), 50);
   $("#sGo")?.addEventListener("click", async () => {
     const name = $("#sN").value.trim(), pin = $("#sP").value; if (!name) return toast("Add your name"); if (pin.length < 4) return toast("Use at least 4 digits");
-    const u = await addUser(name, "supervisor"); await setPin(u, pin); signIn(u); await pickSite(true); location.hash = "home"; route();
+    const u = await addUser(name, "supervisor"); await setPin(u, pin); signIn(u); location.hash = "home"; route();
   });
   $("#lDemo").onclick = async () => { S.store = await Store.demoStore(); await load(); };
+  $("#lSite")?.addEventListener("click", () => { setSite(null); route(); });
   $("#lFold").onclick = async () => { await Store.forget(); S.store = null; S.pts = []; route(); };
 }
 async function suggest(item) {
@@ -1548,7 +1704,7 @@ async function rulesPage() {
       <div class="card" style="overflow:auto;margin-top:8px"><table class="ovt"><tr><th>Name</th><th>Role</th><th>PIN</th><th title="Can read the Feedback list">Feedback list</th><th></th></tr>
         ${users().slice().sort((a, b) => a.role.localeCompare(b.role) || a.name.localeCompare(b.name)).map(u => `<tr data-u="${u.id}"><td class="nm"><input class="cell wide" data-uname value="${esc(u.name)}"></td>
           <td><select class="cell wide" data-urole>${Object.entries(ROLE).map(([k, n]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${n}</option>`).join("")}</select></td>
-          <td>${u.mustReset ? `<span class="muted">starting PIN (1234)</span>` : "set"}</td>
+          <td>${u.mustReset ? `<span class="muted">starting PIN (1234)</span>` : "set"}${u.admin ? ` <span class="muted" title="Same access as a supervisor">· full access</span>` : ""}</td>
           <td style="text-align:center"><input type="checkbox" data-ufb ${u.feedback || u.role === "supervisor" ? "checked" : ""} ${u.role === "supervisor" ? "disabled" : ""}></td>
           <td style="text-align:right"><button class="btn sm" data-reset>Reset PIN</button> ${u.id === S.user?.id ? "" : `<button class="btn sm warn" data-urm>Remove</button>`}</td></tr>`).join("")}</table></div>
       <div class="row" style="margin-top:10px"><input id="nuN" class="btn" style="flex:1;min-width:160px;text-align:left" placeholder="New person's name"><select id="nuR" class="btn">${Object.entries(ROLE).map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select><button class="btn p" id="nuGo">${ic("plus", 14)} Add person</button></div>
@@ -1617,4 +1773,4 @@ async function boot() {
 }
 boot();
 document.addEventListener("keydown", e => { if (e.key !== "Escape") return; const t = $(".tray"); if (t) { t.remove(); $("#gear")?.classList.remove("open"); return; } const m = $$(".scrim").at(-1); if (m) m.close(); });
-window.RN = { S, E, Store, load: () => load() };   // for debugging in the console
+window.RN = { S, E, Store, load: () => load(), saveNow: (...a) => saveNow(...a), pendingLabs: (...a) => pendingLabs(...a) };   // for debugging in the console
