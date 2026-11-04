@@ -8,6 +8,7 @@ import { Store, supported } from "./lib/store.js";
 import { demoPatients } from "./lib/demo.js";
 import { MED_NAMES, findMed } from "./lib/meds.js";
 import { ic } from "./lib/icons.js";
+import { initPresent, startPresentation, presenting } from "./lib/present.js";
 
 // ---------------- state & helpers ----------------
 const localToday = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
@@ -273,6 +274,7 @@ function toggleTray() {
   t.innerHTML = `<h4>Look</h4><div class="looks">${Object.entries(LOOKS).map(([k, [n, bg, fg]]) =>
     `<button data-look="${k}" class="${cur === k ? "on" : ""}"><span class="sw" style="background:${k === "chameleon" ? "conic-gradient(#e5484d,#f0a020,#22c9a0,#4f7cff,#a855f7,#e5484d)" : `linear-gradient(135deg,${bg} 55%,${fg} 55%)`}"></span>${n}</button>`).join("")}</div>
     ${cur === "chameleon" ? `<button class="item" data-reroll>${ic("palette")} New colors</button>` : ""}
+    <button class="item" data-present>${ic("monitor")} Presentation mode</button>
     ${S.store && S.user ? `<h4>Work</h4><button class="item" data-train>${ic("book")} Trainings</button>
       <button class="item" data-rules>${ic("shield")} ${isSup() ? "Supervisor tools" : "Team rules"}</button>` : ""}
     ${feedbackOn() ? `<button class="item" data-flag>${ic("feedback")} Give feedback</button>${seesFeedback() ? `<button class="item" data-hub>${ic("flag")} Feedback list</button>` : ""}` : ""}
@@ -283,6 +285,7 @@ function toggleTray() {
   const close = () => { t.remove(); $("#gear")?.classList.remove("open"); };
   $$("[data-look]", t).forEach(b => b.onclick = () => { ls.set("rn-theme", b.dataset.look); applyTheme(b.dataset.look); close(); toggleTray(); });
   $("[data-reroll]", t)?.addEventListener("click", () => { ls.set("rn-hue", String(Math.floor(Math.random() * 360))); applyTheme("chameleon"); });
+  $("[data-present]", t)?.addEventListener("click", () => { close(); startPresentation(); });
   $("[data-flag]", t)?.addEventListener("click", () => { close(); raiseFlag(); });
   $("[data-hub]", t)?.addEventListener("click", () => { close(); location.hash = "flags"; });
   $("[data-train]", t)?.addEventListener("click", () => { close(); location.hash = "training"; });
@@ -293,6 +296,8 @@ function toggleTray() {
   $("[data-folder]", t)?.addEventListener("click", async () => { close(); await Store.forget(); S.store = null; S.user = null; S.pts = []; location.hash = ""; boot(); });
   setTimeout(() => document.addEventListener("click", function off(e) { if (!t.contains(e.target) && e.target.id !== "gear" && !e.target.closest("#gear")) { close(); document.removeEventListener("click", off); } }), 0);
 }
+// Monitor icon in the corner of the first screens: starts presentation mode.
+function pzButton() { if ($("#pzGo")) return; $("#gear").insertAdjacentHTML("beforebegin", `<button class="gear pzgo" id="pzGo" aria-label="Presentation mode" title="Presentation mode">${ic("monitor", 18)}</button>`); $("#pzGo").onclick = startPresentation; }
 // The very first screen: pick the hospital. Only Aspen Grove is set up so far.
 const SITES = { AGBH: ["Aspen Grove", "Behavioral Hospital · Orem"], SLBH: ["Salt Lake", "Behavioral Health · Salt Lake City"] };
 function setSite(k) { S.site = k; try { k ? sessionStorage.setItem("rn-site", k) : sessionStorage.removeItem("rn-site"); } catch {} }
@@ -301,6 +306,7 @@ function sitePage() {
     <div class="bigsites">${Object.entries(SITES).map(([k, [a, b]]) => `<button class="bigsite" data-s="${k}"><span class="bs-ic">${ic("hospital", 30)}</span><b>${a}</b><span>${b}</span>${k === "SLBH" ? `<i>Coming soon</i>` : ""}</button>`).join("")}</div>
     <p class="warnbox" id="sNo" hidden>Salt Lake Behavioral isn't set up yet. It'll get its own units and setup, modeled on Aspen Grove.</p>
     <button class="btn sm" id="sDemo">Try the demo</button></div>`;
+  pzButton();
   $$("[data-s]").forEach(b => b.onclick = () => { if (b.dataset.s === "SLBH") { $("#sNo").hidden = false; return; } setSite(b.dataset.s); route(); });
   $("#sDemo").onclick = async () => { setSite("AGBH"); S.store = await Store.demoStore(); await load(); };
 }
@@ -366,6 +372,7 @@ function welcome() {
       <button class="btn" id="demo">Try the demo (fake patients)</button>
     </div>
   </div>`;
+  pzButton();
   $("#pick")?.addEventListener("click", async () => { try { S.store = await Store.pick(); await load(); } catch (e) { if (e.name !== "AbortError") toast("Couldn't open that folder: " + e.message); } });
   $("#regrant")?.addEventListener("click", async () => { const s = await Store.regrant(S.regrant); if (s) { S.store = s; S.regrant = null; await load(); } });
   $("#demo").onclick = async () => { S.store = await Store.demoStore(); await load(); };
@@ -401,7 +408,7 @@ async function load() {
   if (!location.hash || location.hash === "#") location.hash = "home"; else route();
 }
 window.addEventListener("focus", async () => {        // pick up other computers' changes
-  if (!S.store || S.open || $(".scrim")) return;
+  if (!S.store || S.open || $(".scrim") || presenting()) return;
   try { S.pts = await S.store.loadPatients(); S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []); S.ann = await S.store.getShared("announce.json", []); S.table = await S.store.getShared("table.json", {}); route(); } catch {}
 });
 
@@ -1773,4 +1780,32 @@ async function boot() {
 }
 boot();
 document.addEventListener("keydown", e => { if (e.key !== "Escape") return; const t = $(".tray"); if (t) { t.remove(); $("#gear")?.classList.remove("open"); return; } const m = $$(".scrim").at(-1); if (m) m.close(); });
+// Hooks for presentation mode (lib/present.js). It only ever uses the demo store.
+const DEMO_SEED = d => ({
+  board: [{ id: uid(), text: "Gray, Sam: family meeting tomorrow at 1300. Provider wants an updated weight first.", by: "Demo scribe", date: d },
+    { id: uid(), text: "Doe, Jane: check the R calf wound before the Augmentin course ends.", by: "Demo provider", date: d }],
+  ann: [{ id: uid(), text: "New H&P template is live. Use the adolescent version for anyone under 18.", by: "Supervisor", byId: "sup", to: "everyone", date: d, seen: [] }],
+});
+initPresent({
+  S, route,
+  async toStart() {
+    endHelp(); $$(".scrim").forEach(x => x.close?.(true)); $(".tray")?.remove();
+    setSite(null); S.store = null; S.user = null; S.pts = []; S.viewDate = null; S.open = null; S.snap = null; S.formDirty = false;
+    history.replaceState(null, "", location.pathname + location.search); lastHash = ""; route();
+  },
+  async enterDemo() {
+    await Store.wipeDemo(); setSite("AGBH");
+    const st = await Store.demoStore(), seed = DEMO_SEED(localToday());
+    await st.setShared("board.json", seed.board); await st.setShared("announce.json", seed.ann);
+    S.store = st; S.ovAll = false; S.expanded = new Set(); S.provider = ""; S.viewDate = null;
+    history.replaceState(null, "", location.pathname + location.search); lastHash = "";
+    await load();
+  },
+  closeModals() { $$(".scrim").forEach(x => x.close?.(true)); },
+  unitPdfUrl(u) {
+    const list = unitPts(u); if (!list.length) return null;
+    const pdf = toPdf(window.jspdf.jsPDF, list.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider || S.days?.[S.today]?.provider || "" }))));
+    return URL.createObjectURL(pdf.output("blob"));
+  },
+});
 window.RN = { S, E, Store, load: () => load(), saveNow: (...a) => saveNow(...a), pendingLabs: (...a) => pendingLabs(...a) };   // for debugging in the console
