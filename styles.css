@@ -687,3 +687,19 @@ body.presenting .pzgo{display:none}
 .bseen span{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;border:1.5px solid var(--paperLine);color:transparent;transition:all .2s}
 .bseen input:checked+span{background:var(--accent);border-color:var(--accent);color:#fff}
 .bbr.seen .bbn b{opacity:.55}
+/* ---------- add diagnosis ---------- */
+.f input.big{font:600 17px var(--serif);padding:10px 12px}
+.seg2{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0 12px}
+.seg2 button{border:1.5px solid var(--paperLine);background:var(--paper);border-radius:10px;padding:8px 12px;text-align:left;font-weight:600;font-size:13.5px;transition:all .2s}
+.seg2 button small{display:block;font-weight:500;font-size:11.5px;color:var(--dim)}
+.seg2 button.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--paper))}
+.nmed{display:grid;grid-template-columns:1.2fr 1.4fr 70px auto auto auto;gap:6px;align-items:center;margin-bottom:6px;animation:in .2s ease-out}
+.nmed input:not([type]),.nmed input[data-k=days]{border:1px solid var(--paperLine);background:var(--paper);border-radius:8px;padding:7px 8px;font-size:13.5px;width:100%}
+.nsug{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:5px}
+.nsug:empty{display:none}
+.mini{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer;margin-right:10px}
+.mini input{accent-color:var(--accent)}
+.nmore{margin-top:6px;border-top:1px solid var(--paperLine);padding-top:8px}
+.nmore summary{cursor:pointer;font-size:12.5px;font-weight:600;color:var(--dim);list-style:none}
+.nmore summary::before{content:"▸ ";display:inline-block;transition:transform .2s}
+.nmore[open] summary::before{transform:rotate(90deg)}

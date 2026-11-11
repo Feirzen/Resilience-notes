@@ -975,7 +975,7 @@ function ptView(id) {
     <div style="min-width:0">
       ${ro ? `<div class="al amber" style="margin-bottom:10px">Old version: how this note read on ${md(S.viewDate)}. Read only.<span class="sp"></span><button class="btn sm" id="reprint">${ic("print", 13)} Print this version</button><button class="btn sm" id="backNow">Back to current</button></div>`
         : lastDate(pt) > S.today ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Prepped for ${md(lastDate(pt))}.<span class="sp"></span><button class="btn sm" id="unprepP">Unprep</button></div>` : ""}
-      ${!ro && pt.status === "admit" ? `<div class="al ${hpReady(pt) ? "" : "amber"} hpst" style="margin-bottom:10px;${hpReady(pt) ? "background:var(--hover);border-color:var(--accent)" : ""}">${hpReady(pt) ? `<b class="prepok" style="margin:0">Ready</b> H&amp;P is ready for the provider.` : `<b class="needprep" style="margin:0">Needs prep</b> H&amp;P still pending.`}<span class="sp"></span><button class="btn sm" id="hpTog">${hpReady(pt) ? "Mark pending" : "Mark ready to see"}</button></div>` : ""}
+      ${!ro && pt.status === "admit" ? `<div class="al ${hpReady(pt) ? "" : "amber"} hpst" style="margin-bottom:10px;${hpReady(pt) ? "background:var(--hover);border-color:var(--accent)" : ""}">${hpReady(pt) ? `<b class="prepok" style="margin:0">Ready</b> H&amp;P is ready for the provider.` : `<b class="needprep" style="margin:0">Needs prep</b> H&amp;P still pending.`}<span class="sp"></span><a class="btn sm" href="#hp-${pt.id}" style="text-decoration:none">${ic("hp", 13)} Edit H&amp;P form</a><button class="btn sm" id="hpTog">${hpReady(pt) ? "Mark pending" : "Mark ready to see"}</button></div>` : ""}
       ${ro ? "" : `<div class="tools" data-help="tools">
         <button class="btn go big" id="addP">${ic("plus")} Add diagnosis</button>
         <button class="btn ic" id="labs">${ic("labs")}<span>Add labs</span></button>
@@ -1218,27 +1218,31 @@ function openEditor(pt, pid) {
   const slot = $(`[data-slot="${pid}"]`); $(`#h-${pid}`)?.classList.add("open");
   const ed = document.createElement("div"); ed.className = "ed";
   ed.innerHTML = `
-    <div class="grid2"><div><label>Diagnosis</label><input id="eName" value="${esc(p.name)}"></div>
-      <div><label>Symptom word (for "reports ___ managed well")</label><input id="eSym" value="${esc(p.symptom || "")}" placeholder="e.g. acid reflux"></div></div>
+    <label>Diagnosis</label><input id="eName" value="${esc(p.name)}">
     <label>HPI ${md(S.date)}${firstDay && !p.hpiOpen ? " (first day: what the patient reports)" : ""}</label>
     <textarea id="eH">${esc(hE.text)}</textarea>
     <label class="lrow">${firstDay ? "Plan (first day)" : "Plan " + md(S.date)}<span class="sp"></span><button class="iconbtn" id="eReset" title="Reset HPI and plan to the suggested wording">${ic("history", 15)}</button></label>
     <textarea id="eP">${esc(firstDay ? (p.planOpen || E.planOpening(p)) : pE.text)}</textarea>
     <div class="meds" id="eMeds" style="margin-top:8px">${meds.map(m => medRow(pt, p, m)).join("")}</div>
     <button class="btn sm" id="eAdd" style="margin-top:6px">${ic("plus", 13)} Add medication</button>
-    <div class="row" style="margin-top:10px"><label class="switch"><input type="checkbox" id="eVitOn" ${p.autoVital ? "checked" : ""}><i></i>Record vitals every day</label>
-      <select id="eVit" class="btn sm" ${p.autoVital ? "" : "hidden"}>${[["bp", "Blood pressure"], ["hr", "Heart rate"], ["bg", "Blood glucose"]].map(([k, n]) => `<option value="${k}" ${p.autoVital === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
-    <label>Options</label>
-    <div class="row">
+    <div class="row" style="margin-top:10px">
       ${isDiabetes(p.name) ? `<span class="muted">Taking insulin?</span><span class="chip ${onInsulin(p) === true ? "on" : ""}" data-o="insY">Yes</span><span class="chip ${onInsulin(p) === false ? "on" : ""}" data-o="insN">No</span><span class="muted">·</span>` : ""}
-      <span class="chip ${p.alwaysFlag ? "on" : ""}" data-o="alwaysFlag">Always flag</span>
-      <span class="chip ${p.pcp ? "on" : ""}" data-o="pcp">PCP follow-up</span>
-      <span class="chip ${p.peLine ? "on" : ""}" data-o="pe">Affects exam</span>
-      <span class="chip ${p.resolved === S.date ? "on" : ""}" data-o="resolve">${p.resolved === S.date ? "Resolving today" : "Resolve today"}</span>
-    </div>
-    <div id="ePe" ${p.peLine ? "" : "hidden"} style="margin-top:6px"><div class="grid2"><select id="ePeK">${PE_LINES.map(([k]) => `<option ${p.peLine?.key === k ? "selected" : ""}>${k}</option>`).join("")}</select>
-      <input id="ePeT" value="${esc(p.peLine?.text || "")}" placeholder="New exam line"></div></div>
-    <div class="row" style="margin-top:12px"><button class="btn sm warn" id="eDel">Delete problem</button><button class="btn sm" id="eTeach" title="Turn this fix into a rule for everyone">${ic("teach", 14)} Make this a rule</button><span class="sp"></span>
+      <span class="chip ${p.resolved === S.date ? "on" : ""}" data-o="resolve">${p.resolved === S.date ? "Resolving today" : "Resolve today"}</span></div>
+    <details class="nmore" ${S.edMore ? "open" : ""} id="eMore"><summary>More options</summary>
+      <label>Symptom word (for "reports ___ managed well")</label><input id="eSym" value="${esc(p.symptom || "")}" placeholder="e.g. acid reflux">
+      <div class="row" style="margin-top:10px"><label class="switch"><input type="checkbox" id="eVitOn" ${p.autoVital ? "checked" : ""}><i></i>Record vitals every day</label>
+        <select id="eVit" class="btn sm" ${p.autoVital ? "" : "hidden"}>${[["bp", "Blood pressure"], ["hr", "Heart rate"], ["bg", "Blood glucose"]].map(([k, n]) => `<option value="${k}" ${p.autoVital === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+      <div class="row" style="margin-top:8px">
+        <span class="chip ${p.alwaysFlag ? "on" : ""}" data-o="alwaysFlag">Always flag</span>
+        <span class="chip ${p.pcp ? "on" : ""}" data-o="pcp">PCP follow-up</span>
+        <span class="chip ${p.peLine ? "on" : ""}" data-o="pe">Affects exam</span>
+        <span class="chip ${p.planOnly ? "on" : ""}" data-o="planOnly" title="Found on labs or exam, nothing the patient reports">Plan only</span>
+      </div>
+      <div id="ePe" ${p.peLine ? "" : "hidden"} style="margin-top:6px"><div class="grid2"><select id="ePeK">${PE_LINES.map(([k]) => `<option ${p.peLine?.key === k ? "selected" : ""}>${k}</option>`).join("")}</select>
+        <input id="ePeT" value="${esc(p.peLine?.text || "")}" placeholder="New exam line"></div></div>
+      <div class="row" style="margin-top:10px"><button class="btn sm warn" id="eDel">Delete problem</button><button class="btn sm" id="eTeach" title="Turn this fix into a rule for everyone">${ic("teach", 14)} Make this a rule</button></div>
+    </details>
+    <div class="row" style="margin-top:12px"><span class="sp"></span>
       <span class="muted" id="eUns" ${S.snap?.dirty ? "" : "hidden"}>Not saved yet</span><button class="btn" id="eCancel">Cancel</button><button class="btn p ${S.snap?.dirty ? "go" : ""}" id="eDone">Save</button></div>`;
   slot.append(ed); setTimeout(layoutComments, 30);
   ed.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1295,6 +1299,7 @@ function openEditor(pt, pid) {
     if (o === "insN") p.insulin = false;
     if (o === "pe") { if (p.peLine) delete p.peLine; else p.peLine = { key: "SKIN", text: "" }; }
     if (o === "resolve") p.resolved = p.resolved === S.date ? undefined : S.date;
+    if (o === "planOnly") p.planOnly = !p.planOnly || undefined;
     changed(); openEditor(pt, pid);
   });
   $("#ePeK", ed).onchange = e => { p.peLine.key = e.target.value; changed(); };
@@ -1310,31 +1315,74 @@ function openEditor(pt, pid) {
     p.meds = p.meds.filter(m => m.name?.trim());
     S.open = null; S.snap = null; await saveNow(pt, { why: `Edited ${p.name}` }); toast("Saved"); route(); });
   $("#eCancel", ed).onclick = () => { discard(); route(); };
+  $("#eMore", ed).ontoggle = e => { S.edMore = e.target.open; };
   $("#eTeach", ed).onclick = () => teachModal(pt, p, hE, pE);
 }
+// Add diagnosis: one window. Name, where it goes (patient reports it, or labs/exam only = Plan only), what they report,
+// medications with common doses, and a plan that writes itself from the meds (still editable). Rare settings sit under More options.
 function addProblem(pt) {
   const cur = pt.problems.filter(q => !(q.resolved && q.resolved < S.today));
   const known = Object.keys(rulebook()).sort();
-  const m = modal(`${ic("plus")} Add diagnosis`, `${cur.length ? `<div class="lbl" style="margin-top:0">Already on this note</div><div class="row" style="margin-bottom:8px">${cur.map(q => `<span class="chip">${esc(q.name)}</span>`).join("")}</div>` : ""}
-    <div class="f"><span>Diagnosis</span><input id="nN" list="dxList" autocomplete="off" placeholder="e.g. Cellulitis, left forearm"><datalist id="dxList">${known.map(k => `<option value="${esc(k)}">`).join("")}</datalist></div>
+  const meds = [];
+  let planTouched = false, symTouched = false, where = "hpi";
+  const medHtml = (m, i) => `<div class="nmed" data-i="${i}">
+      <input data-k="name" value="${esc(m.name || "")}" placeholder="Medication" list="medList" autocomplete="off">
+      <input data-k="dose" value="${esc([m.dose, m.route, m.freq].filter(Boolean).join(" "))}" placeholder="Dose · route · how often">
+      <input data-k="days" value="${esc(m.days || "")}" placeholder="# days" inputmode="numeric" title="For a course (antibiotics, steroids). Leave blank if ongoing.">
+      <label class="mini"><input type="checkbox" data-k="prn" ${m.prn ? "checked" : ""}>PRN</label>
+      <label class="mini"><input type="checkbox" data-k="home" ${m.home ? "checked" : ""}>Home</label>
+      <button class="btn sm" data-rm title="Remove">${ic("x", 12)}</button>
+      <div class="nsug">${(findMed(m.name) || []).map((o, k) => `<button type="button" class="chip sug" data-sug="${k}">${esc([o.dose, o.route, o.freq, o.prn ? "PRN" : ""].filter(Boolean).join(" "))}</button>`).join("")}</div></div>`;
+  const m = modal(`${ic("plus")} Add diagnosis`, `
+    <div class="f"><span>Diagnosis</span><input id="nN" class="big" list="dxList" autocomplete="off" placeholder="e.g. Cellulitis, left forearm"><datalist id="dxList">${known.map(k => `<option value="${esc(k)}">`).join("")}</datalist></div>
     <p class="warnbox" id="nDup" hidden></p>
-    <div class="f"><span>What the patient reports today</span><textarea id="nH" rows="3" placeholder="Patient presents with…"></textarea></div>
-    <div class="f"><span>Plan</span><textarea id="nP" rows="2" placeholder="Will treat with… (or leave blank: Will continue to monitor)"></textarea></div>
-    <div class="f"><span>Symptom word</span><input id="nS" placeholder="e.g. cellulitis"></div>
-    <p class="muted">Add medications right after saving. The first entry is dated ${md(S.date)}.</p>`,
-    `<button class="btn" data-x>Cancel</button><button class="btn p" id="nGo">Save diagnosis</button>`);
+    <div class="seg2" id="nWhere"><button class="on" data-w="hpi">Patient reports it<small>HPI + Plan</small></button><button data-w="plan">Labs or exam only<small>Plan only</small></button></div>
+    <div class="f" id="nHw"><span>What the patient reports</span><textarea id="nH" rows="2" placeholder="Patient presents with… / Patient reports taking … at home for …"></textarea></div>
+    <div class="f"><span>Medications</span><div id="nMeds"></div><button class="btn sm" id="nAddM" type="button">${ic("plus", 12)} Add medication</button></div>
+    <div class="f"><span>Plan <em class="muted" id="nPauto" style="text-transform:none;letter-spacing:0;font-weight:500">· writes itself from the meds</em></span><textarea id="nP" rows="2">Will continue to monitor</textarea></div>
+    <details class="nmore"><summary>More options</summary>
+      <div class="grid2" style="margin-top:8px"><div class="f"><span>Symptom word (for "reports ___ managed well")</span><input id="nS" placeholder="auto from the name"></div>
+        <div class="f"><span>Record a vital every day</span><select id="nV"><option value="">No</option><option value="bp">Blood pressure</option><option value="hr">Heart rate</option><option value="bg">Blood glucose</option></select></div></div>
+      <div class="row"><label class="mini"><input type="checkbox" id="nAF"> Always flag</label><label class="mini"><input type="checkbox" id="nPCP"> PCP follow-up</label></div>
+    </details>
+    ${cur.length ? `<p class="muted small" style="margin-top:10px">Already on this note: ${cur.map(q => esc(q.name)).join(", ")}</p>` : ""}`,
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="nGo">Save diagnosis</button>`, true);
   const norm = x => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const dupOf = name => { const a = norm(name); return a.length > 2 && cur.find(q => { const b = norm(q.name); return b === a || b.includes(a) || a.includes(b); }); };
+  const parseDose = t => { const w = t.trim().split(/\s+/).filter(Boolean); const ri = w.findIndex(x => /^(PO|IV|IM|SQ|SL|INH|TD|topical|ODT|PR|NG)$/i.test(x));
+    return ri > 0 ? { dose: w.slice(0, ri).join(" "), route: w[ri], freq: w.slice(ri + 1).join(" ") || undefined } : { dose: w[0], route: undefined, freq: w.slice(1).join(" ") || undefined }; };
+  const asMeds = () => meds.filter(x => x.name?.trim()).map(x => { const d = parseDose(x.doseText || ""), n = parseInt(x.days);
+    return { id: x.id, name: x.name.trim(), ...d, prn: !!x.prn, home: !!x.home, start: S.date, ...(n > 0 ? { end: E.addDays(S.date, n - 1) } : {}) }; });
+  const autoPlan = () => { if (planTouched) return; $("#nP", m).value = E.planOpening({ start: S.date, meds: asMeds() }); };
+  const drawMeds = () => { $("#nMeds", m).innerHTML = meds.map((x, i) => medHtml({ ...x, dose: x.doseText }, i)).join(""); wireMeds(); };
+  const wireMeds = () => $$(".nmed", m).forEach(r => { const x = meds[+r.dataset.i];
+    $('[data-k="name"]', r).oninput = e => { x.name = e.target.value; const o = findMed(x.name); $(".nsug", r).innerHTML = (o || []).map((o2, k) => `<button type="button" class="chip sug" data-sug="${k}">${esc([o2.dose, o2.route, o2.freq, o2.prn ? "PRN" : ""].filter(Boolean).join(" "))}</button>`).join(""); wireSug(r, x); autoPlan(); };
+    $('[data-k="dose"]', r).oninput = e => { x.doseText = e.target.value; autoPlan(); };
+    $('[data-k="days"]', r).oninput = e => { x.days = e.target.value; autoPlan(); };
+    $('[data-k="prn"]', r).onchange = e => { x.prn = e.target.checked; autoPlan(); };
+    $('[data-k="home"]', r).onchange = e => { x.home = e.target.checked; autoPlan(); };
+    $("[data-rm]", r).onclick = () => { meds.splice(+r.dataset.i, 1); drawMeds(); autoPlan(); };
+    wireSug(r, x); });
+  const wireSug = (r, x) => $$("[data-sug]", r).forEach(c => c.onclick = () => { const o = findMed(x.name)[+c.dataset.sug];
+    x.doseText = [o.dose, o.route, o.freq].filter(Boolean).join(" "); x.prn = !!o.prn; drawMeds(); autoPlan(); });
+  $("#nAddM", m).onclick = () => { meds.push({ id: uid(), name: "", home: false }); drawMeds(); $$('.nmed [data-k="name"]', m).at(-1)?.focus(); };
+  $("#nP", m).oninput = () => { planTouched = true; $("#nPauto", m).hidden = true; };
+  $("#nS", m).oninput = () => { symTouched = true; };
+  $$("[data-w]", m).forEach(b => b.onclick = () => { where = b.dataset.w; $$("[data-w]", m).forEach(x => x.classList.toggle("on", x === b)); $("#nHw", m).hidden = where === "plan"; });
   $("#nN", m).focus();
-  $("#nN", m).oninput = e => { const d = dupOf(e.target.value); $("#nDup", m).hidden = !d; if (d) $("#nDup", m).innerHTML = `Looks like <b>${esc(d.name)}</b> is already on this note. Add today's update there instead? <button class="btn sm" id="nOpen">Open ${esc(d.name)}</button>`;
+  $("#nN", m).oninput = e => { const v = e.target.value, d = dupOf(v), tr = rulebook()[v];
+    if (tr?.autoVital) $("#nV", m).value = tr.autoVital;
+    $("#nDup", m).hidden = !d; if (d) $("#nDup", m).innerHTML = `Looks like <b>${esc(d.name)}</b> is already on this note. Add today's update there instead? <button class="btn sm" id="nOpen">Open ${esc(d.name)}</button>`;
     $("#nOpen", m)?.addEventListener("click", () => { m.close(true); S.open = d.id; route(); }); };
   $("#nGo", m).onclick = async () => {
-    const name = $("#nN", m).value.trim(); if (!name) return;
+    const name = $("#nN", m).value.trim(); if (!name) return $("#nN", m).focus();
     const d = dupOf(name); if (d && !(await ask("Add a second one?", `<b>${esc(d.name)}</b> is already on this note.`, "Add anyway", "Go back"))) return;
-    const tr = rulebook()[name] || {};
-    const p = { id: uid(), name, symptom: $("#nS", m).value.trim() || name.toLowerCase(), autoVital: tr.autoVital, start: S.date, hpiOpen: null, planOpen: $("#nP", m).value.trim() || "Will continue to monitor", meds: [],
-      hpi: [{ date: S.date, text: $("#nH", m).value.trim(), auto: "" }], plan: [] };
-    pt.problems.push(p); m.close(true); await saveNow(pt, { why: `Added ${name}` }); S.open = p.id; route();
+    const ms = asMeds();
+    const p = { id: uid(), name, symptom: (symTouched && $("#nS", m).value.trim()) || name.toLowerCase(), autoVital: $("#nV", m).value || undefined, start: S.date, hpiOpen: null,
+      planOpen: $("#nP", m).value.trim() || "Will continue to monitor", meds: ms,
+      hpi: where === "plan" ? [] : [{ date: S.date, text: $("#nH", m).value.trim(), auto: "" }], plan: [],
+      ...(where === "plan" ? { planOnly: true } : {}), ...($("#nAF", m).checked ? { alwaysFlag: true } : {}), ...($("#nPCP", m).checked ? { pcp: true } : {}) };
+    pt.problems.push(p); m.close(true); await saveNow(pt, { why: `Added ${name}` }); toast(`${name} added`); route();
   };
 }
 
@@ -1738,7 +1786,7 @@ function hpForm(id) {
   const scribes = scribeNames();
   const probRow = (p = {}) => { const m = p.meds?.[0] || {}; return `<div class="card hpP" style="padding:10px;margin-bottom:8px;box-shadow:none">
     <div class="grid2"><div class="f"><span>Diagnosis</span><input data-f="name" value="${esc(p.name || "")}"></div><div class="f"><span>Symptom word</span><input data-f="symptom" value="${esc(p.symptom || "")}" placeholder="e.g. acid reflux"></div></div>
-    <div class="f"><span>HPI (what they report / take at home)</span><input data-f="hpi" value="${esc(p.hpiOpen || "")}" placeholder="Patient reports taking Omeprazole 40mg BID PRN at home to manage acid reflux"></div>
+    <div class="f"><span>HPI (what they report / take at home)</span><input data-f="hpi" value="${esc(p.hpiOpen || p.hpi?.find(e => e.date === p.start)?.text || "")}" placeholder="Patient reports taking Omeprazole 40mg BID PRN at home to manage acid reflux"></div>
     <div class="grid2"><div class="f"><span>Medication</span><input data-f="mname" list="medList" autocomplete="off" value="${esc(m.name || "")}"></div><div class="f"><span>Dose · route · freq</span><input data-f="mdose" value="${esc([m.dose, m.route, m.freq].filter(Boolean).join(" "))}" placeholder="40mg PO BID"></div></div>
     <div class="row hpSug" style="margin-bottom:6px"></div>
     <div class="row"><label class="chip ${m.home !== false && m.name ? "on" : ""}"><input type="checkbox" data-f="home" ${m.home !== false ? "checked" : ""} hidden>Home med</label><label class="chip"><input type="checkbox" data-f="prn" ${m.prn ? "checked" : ""}> PRN</label><span class="sp"></span><button class="btn sm warn" data-rmp>Remove</button></div></div>`; };
@@ -1793,14 +1841,19 @@ function hpForm(id) {
     delete rec.needsPrep; rec.hpReady = ready;
     rec.blurb = rec.blurb || `Patient is a ${age} year-old ${rec.sex} who admitted to Aspen Grove Behavioral Hospital for inpatient treatment due to ${rec.psych.dx}.`;
     const vv = {}; $$("[data-v]").forEach(i => { if (i.value.trim()) vv[i.dataset.v] = i.value.trim(); }); rec.vitals[admit] = vv;
-    rec.labs = $("#hLab").value.trim() ? [{ date: admit, text: $("#hLab").value.trim(), bullets: [] }] : [];
+    { const t = $("#hLab").value.trim(), rest = (rec.labs || []).slice(1);      // the box edits the first lab line; labs added elsewhere stay
+      rec.labs = t ? [{ ...(rec.labs?.[0] || { date: admit, bullets: [] }), text: t }, ...rest] : rest; }
     rec.problems = $$(".hpP").map(r => {
       const g = k => $(`[data-f="${k}"]`, r); const nm = g("name").value.trim(); if (!nm) return null;
       const old = probs.find(p => p.name === nm);
       const [dose, route, ...freq] = g("mdose").value.trim().split(/\s+/);
-      const meds = g("mname").value.trim() ? [{ id: old?.meds?.[0]?.id || uid(), name: g("mname").value.trim(), dose, route, freq: freq.join(" ") || undefined, prn: g("prn").checked, home: g("home").checked, start: admit }] : [];
-      const p = { ...(old || {}), id: old?.id || uid(), name: nm, symptom: g("symptom").value.trim() || nm.toLowerCase(), start: admit, hpiOpen: g("hpi").value.trim() || null, meds, hpi: old?.hpi || [], plan: old?.plan || [] };
-      p.planOpen = E.planOpening(p); return p;
+      const meds = [...(g("mname").value.trim() ? [{ ...(old?.meds?.[0] || {}), id: old?.meds?.[0]?.id || uid(), name: g("mname").value.trim(), dose, route, freq: freq.join(" ") || undefined, prn: g("prn").checked, home: g("home").checked, start: old?.meds?.[0]?.start || admit }] : []),
+        ...(old?.meds || []).slice(1)];                                      // meds added in the note editor stay too
+      const hv = g("hpi").value.trim(), first = !old?.hpiOpen && old?.hpi?.find(e => e.date === old.start);
+      if (first) first.text = hv;                                          // added with "Add diagnosis": the text lives in its first dated entry
+      const p = { ...(old || {}), id: old?.id || uid(), name: nm, symptom: g("symptom").value.trim() || nm.toLowerCase(), start: old?.start || admit, hpiOpen: first ? null : hv || null, meds, hpi: old?.hpi || [], plan: old?.plan || [] };
+      const autoBefore = !old || !old.planOpen || old.planOpen === "Will continue to monitor" || old.planOpen === E.planOpening(old);
+      if (autoBefore) p.planOpen = E.planOpening(p); return p;                // a plan someone typed by hand isn't overwritten
     }).filter(Boolean);
     if (!rec.times[admit]) E.assignTimes([rec], admit, rec.id + admit);
     if (!pt) S.pts.push(rec);
