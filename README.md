@@ -13,12 +13,26 @@ See `NOTICE.md`: the note templates, the provider sheet layout, and unit/site na
 - **Print unit** shows every patient with a checkbox (select all / deselect all), "Edited today", and warnings before printing: vitals missing (not entered and not marked Refused/UTO), open flags, and "Any labs to review?" when nobody on the unit has labs added today.
 - Still one print job. **Signed page on top** (on by default, remembered per provider in `_app-data/printprefs.json`): each note's pages are split at the page with the signature line and the back half goes on top (3 pages: 3,1,2; signed on 3 of 4: 3,4,1,2).
 - The signing block (Signed/Scribe, providers, BC, EKG) never splits across pages, in the PDF or the Word file.
-- **Print check** opens after printing (and from the unit page): patients in print order with billing code, admit, EKG, page order, and check-offs saved for the day.
+- **Billing** (unit page and Home > All patients): type 1/2/3 per patient (saves into the Home list), EKG toggle right next to it, Always 3 code with its reason.
 
 ## Vitals, admits, labs
 - Vitals: **Refused** / **UTO** fill a whole row (BG only for patients who get BG checks). The HPI then reads "refused vitals today" / "BP unable to obtain today".
 - **Add admits** on Home: type names as a list (Enter for the next), each gets an empty H&P marked **Needs prep** until its H&P form is saved.
 - **Labs** on a unit: the whole unit's lab review on one screen. Pending labs up top (tap to add), diagnoses small unless waiting on a lab (tap to change today's plan), "New diagnosis from labs" adds a Plan-only diagnosis. One save.
+
+## Moving fast
+- Open-note tabs under the unit bar. Ctrl-click or middle-click a patient to open it as a tab without leaving the page; Alt+1-9 jumps between tabs. The note you're on is a light preview tab until you change something.
+- Leaving a note with unsaved edits saves it in the background. Several edits while a save is waiting become one save.
+
+## Two computers, one note
+- Every save bumps a version. If another computer saved first, the app merges both (lib/merge.js, entry by entry). Only the same entry changed two different ways asks a person ("Pick versions", or decide later and the note stays flagged).
+- An open note checks every 15 seconds and refreshes itself when someone else saved it (if you're not mid-edit).
+
+## Bedboard, notes, holidays
+- **Bedboard** (top bar): a square per unit, colored by status, seen + billing, per-person view settings, one-page fold-up print (lib/board-pdf.js).
+- **Pinned notes** on Home link patients by name (type a name or @). Linked notes show on those patients' notes and only go away when someone marks them resolved. "Show big every time" makes a note pop over the patient's note once per visit until OK.
+- **Vital alerts**: Settings > Vital alerts, each person's own limits. **Labs pending over a week** turn red.
+- **Holidays**: lib/holidays.js. Toggle in Settings > Look.
 
 ## Presentation mode
 The monitor icon on the first screen (or Settings > Presentation mode) runs slides plus live guided tours on fake patients. Keys: → or Space next, ← back, Esc twice to exit. The first time it runs, `sw.js` saves an offline copy of the app's own files so it still loads on bad Wi-Fi. `lib/present.js` holds the deck.

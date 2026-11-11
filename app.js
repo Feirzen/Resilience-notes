@@ -1620,6 +1620,7 @@ async function printModal(list) {
       <label class="pmain"><input type="checkbox" data-sel ${sel.has(pt.id) ? "checked" : ""}><span class="pn">${esc(pt.name)}</span>${admA(pt)}
         ${touchedToday(pt) ? `<span class="ptag ed">Edited today</span>` : `<span class="ptag">No edits today</span>`}
         ${vn ? `<span class="ptag">Vitals: ${vn}</span>` : ""}${ekgToday(pt) ? `<span class="ptag ekg">EKG</span>` : ""}</label>
+      ${pt.status === "admit" && !hpReady(pt) ? `<div class="pflag"><label class="chk"><input type="checkbox" data-ack="h-${pt.id}"><div>H&amp;P still pending<small>Not marked ready to see yet</small></div></label><a class="btn sm" href="#hp-${pt.id}" style="text-decoration:none">Open H&amp;P</a></div>` : ""}
       ${nv ? `<div class="pflag"><label class="chk"><input type="checkbox" data-ack="v-${pt.id}"><div>Vitals missing<small>Not entered, and not marked Refused or UTO</small></div></label><button class="btn sm" data-vit="${pt.id}">Enter vitals</button></div>` : ""}
       ${fl.map(([x, i]) => `<div class="pflag"><label class="chk"><input type="checkbox" data-fc="${i}" ${x.auto ? "checked" : ""}><div>${esc(x.text)}<small>${x.auto ? "Edited today, checked for you" : "Not addressed yet"}</small></div></label></div>`).join("")}
     </div>`; };
