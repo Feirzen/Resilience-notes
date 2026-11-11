@@ -1,7 +1,7 @@
 // Offline copy of NoteMaker's own files (code, styles, icons). No patient data is ever cached:
 // notes live in the team folder, which the browser reads directly and this worker never sees.
 // Online: always fetch the newest file first. Offline or slow Wi-Fi: fall back to the saved copy.
-const CACHE = "notemaker-v1";
+const CACHE = "notemaker-v2";
 const FILES = [
   "./", "index.html", "styles.css", "app.js", "boot-guard.js", "sw.js", "manifest.webmanifest",
   "engine/engine.js",

@@ -39,9 +39,12 @@ const vitalLabel = { bp: "BP", hr: "HR", bg: "BG" };
 // "start X 50 mg BID" becomes "Cont. X" the next day and doses drop after the first mention,
 // but dates on a course (antibiotics, tapers) always stay.
 const lastEntry = (list, date) => list.filter(e => e.date < date).sort((a, b) => a.date < b.date ? -1 : 1).pop();
+// Refused / UTO typed in the vitals box reads as words, not "BP today is Refused".
+export const vitalWords = (label, v) => /^refused$/i.test(String(v)) ? "refused vitals today"
+  : /^uto$/i.test(String(v)) ? `${label} unable to obtain today` : `${label} today is ${v}`;
 const swapVitals = (patient, text, date) => text.replace(/\b(BP|HR|BG) today is (?:\[\s*(?:\.\.\.|…)?\s*\]|X\b|\d+(?:\/\d+)?(?:\.\d+)?)?/g, (m, k) => {
   const v = patient.vitals?.[date]?.[k.toLowerCase()];
-  return `${k} today is ${v ?? "[...]"}`;
+  return v == null ? `${k} today is [...]` : vitalWords(k, v);
 });
 const DOSE = /\s+\d[\d.,]*\s*(?:mg|mcg|g|units?|ml|%|puffs?)(?:\s*\/\s*(?:hr|hour)|\s+hr)?\b(?:\s+(?:PO|IV|IM|SQ|SL|INH|topical|TD|pt\s*72\s*TD|gel|per inhalation))*(?:\s*,?\s*(?:QD|BID|TID|QID|Q\d+H|QHS|QAM|QPM|daily|nightly|PRN)\b)*/gi;
 // "x7 days" / "x2 more days" -> "(last dose M/D)" counted from the day it was first written.
@@ -139,7 +142,7 @@ export function defaultHpi(patient, p, date, rules) {
 
   let status;
   const custom = rules?.dx?.[p.name]?.status;               // team rule: preferred wording for this diagnosis
-  if (v !== null) status = `${vitalLabel[p.autoVital]} today is ${v}`;
+  if (v !== null) status = vitalWords(vitalLabel[p.autoVital], v);
   else if (custom && taking.length) status = custom;
   else if (taking.length) status = `reports ${p.symptom || p.name.toLowerCase()} managed well with medications`;
   else status = `reports baseline ${p.symptom || p.name.toLowerCase()} symptoms today`;
@@ -279,7 +282,8 @@ export function fillVitals(patient, date) {
     const e = p.hpi.find(x => x.date === date);
     if (v && e && e.text.includes("[...]")) {
       const wasAuto = e.text === e.auto;
-      e.text = e.text.replace("[...]", v);
+      const lab = vitalLabel[p.autoVital];
+      e.text = e.text.includes(`${lab} today is [...]`) ? e.text.replace(`${lab} today is [...]`, vitalWords(lab, v)) : e.text.replace("[...]", v);
       if (wasAuto) e.auto = e.text;
     }
   }

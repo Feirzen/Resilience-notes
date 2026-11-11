@@ -203,4 +203,16 @@ t("team wording rules apply during prep", () => {
   assert.equal(g.plan.at(-1).text, "Continue Omeprazole.");
 });
 
+t("Refused / UTO vitals read as words in the HPI", () => {
+  const p = fake(), htn = p.problems[0];
+  p.vitals["2026-10-31"] = { bp: "Refused", hr: "Refused" };
+  assert.match(E.defaultHpi(p, htn, "2026-10-31"), /refused vitals today\.$/);
+  p.vitals["2026-10-31"] = { bp: "UTO" };
+  assert.match(E.defaultHpi(p, htn, "2026-10-31"), /BP unable to obtain today\.$/);
+  htn.hpi.push({ date: "2026-11-01", text: "Patient taking Lisinopril, BP today is [...].", auto: "Patient taking Lisinopril, BP today is [...]." });
+  p.vitals["2026-11-01"] = { bp: "refused" };
+  E.fillVitals(p, "2026-11-01");
+  assert.equal(htn.hpi.at(-1).text, "Patient taking Lisinopril, refused vitals today.");
+});
+
 console.log(`\n${pass} passed`);

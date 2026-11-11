@@ -9,6 +9,17 @@ Live: https://feirzen.github.io/Resilience-notes/ (capital R: GitHub Pages addre
 ## Ownership
 See `NOTICE.md`: the note templates, the provider sheet layout, and unit/site names belong to Resilience Health and are reproduced only for compatibility. Microsoft sign-in and SharePoint are planned, not built.
 
+## Printing
+- **Print unit** shows every patient with a checkbox (select all / deselect all), "Edited today", and warnings before printing: vitals missing (not entered and not marked Refused/UTO), open flags, and "Any labs to review?" when nobody on the unit has labs added today.
+- Still one print job. **Signed page on top** (on by default, remembered per provider in `_app-data/printprefs.json`): each note's pages are split at the page with the signature line and the back half goes on top (3 pages: 3,1,2; signed on 3 of 4: 3,4,1,2).
+- The signing block (Signed/Scribe, providers, BC, EKG) never splits across pages, in the PDF or the Word file.
+- **Print check** opens after printing (and from the unit page): patients in print order with billing code, admit, EKG, page order, and check-offs saved for the day.
+
+## Vitals, admits, labs
+- Vitals: **Refused** / **UTO** fill a whole row (BG only for patients who get BG checks). The HPI then reads "refused vitals today" / "BP unable to obtain today".
+- **Add admits** on Home: type names as a list (Enter for the next), each gets an empty H&P marked **Needs prep** until its H&P form is saved.
+- **Labs** on a unit: the whole unit's lab review on one screen. Pending labs up top (tap to add), diagnoses small unless waiting on a lab (tap to change today's plan), "New diagnosis from labs" adds a Plan-only diagnosis. One save.
+
 ## Presentation mode
 The monitor icon on the first screen (or Settings > Presentation mode) runs slides plus live guided tours on fake patients. Keys: → or Space next, ← back, Esc twice to exit. The first time it runs, `sw.js` saves an offline copy of the app's own files so it still loads on bad Wi-Fi. `lib/present.js` holds the deck.
 

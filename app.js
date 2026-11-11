@@ -578,7 +578,8 @@ function home() {
     <div class="card census" data-help="census">
       <div class="cz"><b>${live.length}</b><span>in house</span></div>
       <div class="cz"><b>${admits.length}</b><span>admit${admits.length === 1 ? "" : "s"} today</span></div>
-      <div class="cadm">${admits.map(p => `<a href="#pt-${p.id}">${admA(p)}${esc(p.name)}<i>${p.unit}</i></a>`).join("") || `<span class="muted">No new admits yet</span>`}</div>
+      <div class="cadm">${admits.map(p => `<a href="#${p.needsPrep ? "hp-" : "pt-"}${p.id}">${admA(p)}${esc(p.name)}<i>${p.unit}</i>${p.status === "admit" ? (p.needsPrep ? `<b class="needprep">Needs prep</b>` : `<b class="prepok">Ready</b>`) : ""}</a>`).join("") || `<span class="muted">No new admits yet</span>`}
+        <button class="btn sm addadm" id="addAdm">${ic("plus", 13)} Add admits</button></div>
     </div>
     <div class="card fuwrap" data-help="units">
       <div class="fuh"><b>${fuTotal}</b> follow-up flag${fuTotal === 1 ? "" : "s"}</div>
@@ -619,6 +620,7 @@ function home() {
     </div>
   </aside></div>`;
   $("#imp").onclick = e => busy(e.currentTarget, importNotes);
+  $("#addAdm").onclick = bulkAdmits;
   const dayField = (id, key, clean = v => v.trim()) => $(id).onchange = async e => { await saveDay({ [key]: clean(e.target.value) }); toast("Saved"); };
   const mil = v => v.replace(/\D/g, "") ? v.replace(/\D/g, "").padStart(4, "0").slice(-4) : "";
   dayField("#dP", "provider"); dayField("#dIn", "in", mil); dayField("#dOut", "out", mil); dayField("#dE", "ekg", v => v.replace(/\D/g, ""));
@@ -724,14 +726,14 @@ function unitView(u) {
     && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.today)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
-      <button class="btn" id="qn">${ic("note")} Make a Note</button><button class="btn" id="vit">${ic("vitals")} Vitals</button><button class="btn" id="prn">${ic("print")} Print unit</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
+      <button class="btn" id="qn">${ic("note")} Make a Note</button><button class="btn" id="vit">${ic("vitals")} Vitals</button><button class="btn" id="labsU">${ic("labs")} Labs</button><button class="btn" id="prn">${ic("print")} Print unit</button>${S.days?.[S.today]?.printed?.[u] ? `<button class="btn" id="pchk" title="After printing: billing, admits, EKGs, check-offs">${ic("check")} Print check</button>` : ""}<button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
     ${preppedCount ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">${preppedCount} of ${l.length} notes prepped for ${md(tmw)}.<span class="sp"></span><button class="btn sm" id="unprepU">Unprep ${u}</button></div>` : ""}
 
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
       const fs = loud(flagsFor(p)); const top = fs.find(f => f.level === "red") || fs[0];
       const qn = (p.notes || []).filter(n => n.kind === "quick" && !n.done).length;
-      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="admpill">${ic("hp", 12)} New admit</span>` : ""}${qn ? `<span class="qpill">${ic("note", 12)} ${qn} note${qn > 1 ? "s" : ""} to write up</span>` : ""}</span>
+      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="admpill">${ic("hp", 12)} New admit</span>${p.needsPrep ? `<b class="needprep">Needs prep</b>` : ""}` : ""}${qn ? `<span class="qpill">${ic("note", 12)} ${qn} note${qn > 1 ? "s" : ""} to write up</span>` : ""}</span>
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
     }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>
     ${(() => { const dc = S.pts.filter(p => p.unit === u && p.status === "discharged").sort((a, b) => (b.dischargedOn || "").localeCompare(a.dischargedOn || ""));
@@ -743,9 +745,11 @@ function unitView(u) {
     const pg = progress(`Unprepping ${u}`); try { await pool(l.filter(isPrepped), 6, p => unprep(p)); } finally { pg.close(); } toast(`${u} is back to ${md(S.today)}`); route();
   }));
   $("#vit").onclick = () => vitalsModal(u);
+  $("#labsU").onclick = () => bulkLabs(u);
   $("#qn").onclick = () => stickyModal(l);
   $$(".dcbox .it").forEach(a => a.addEventListener("click", () => {}));
   $("#prn").onclick = () => printModal(unitPts(u));
+  $("#pchk")?.addEventListener("click", () => printCheck(u));
   $("#prep").onclick = e => busy(e.currentTarget, () => prepUnit(u));
   $("#catch")?.addEventListener("click", e => busy(e.currentTarget, async () => {
     const pg = progress(`Prepping ${u} for ${md(S.today)}`);
@@ -1246,14 +1250,14 @@ function reprintModal(pt) {
   const m = modal(`${ic("print")} Print`, `<p style="font-size:15px"><b>${esc(pt.name)}</b><br><span class="muted">Note for ${new Date(d + "T12:00").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</span></p>
     <div class="f" style="margin-top:12px"><span>Provider</span><select id="rP"><option value="">(none)</option>${providerNames().map(p => `<option ${(S.provider || S.days?.[S.today]?.provider) === p ? "selected" : ""}>${p}</option>`).join("")}</select></div>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="rGo">Print</button>`);
-  $("#rGo", m).onclick = () => { S.provider = $("#rP", m).value; m.close(true); printPdf([blocksFor(pt, d, popts({ provider: S.provider }))], `${pt.file} ${md(d).replace("/", "-")}.pdf`); };
+  $("#rGo", m).onclick = async () => { S.provider = $("#rP", m).value; m.close(true); printPdf([blocksFor(pt, d, popts({ provider: S.provider }))], `${pt.file} ${md(d).replace("/", "-")}.pdf`, { sigFirst: sigFirstFor(await printPrefs(), S.provider) }); };
 }
 async function discharge(pt) {
   const m = modal(`Discharge ${esc(pt.name)}`, `<p class="muted" style="font-size:14px">Moves the note into ${pt.unit}'s discharge folder and takes them off the list.</p>
     <label class="chk"><input type="checkbox" id="dSeen"><div>We saw them today<small>Print today's note before moving it</small></div></label>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="dGo">Discharge</button>`);
   $("#dGo", m).onclick = e => busy(e.currentTarget, async () => {
-    if ($("#dSeen", m).checked) await printPdf([progressBlocks(pt, S.today, popts({ provider: S.provider }))], `${pt.file}.pdf`);
+    if ($("#dSeen", m).checked) await printPdf([progressBlocks(pt, S.today, popts({ provider: S.provider }))], `${pt.file}.pdf`, { sigFirst: sigFirstFor(await printPrefs(), S.provider) });
     await saveNow(pt, { why: "Discharged" }); await queue[pt.id]; docxQ.delete(pt.id); await writeDocx(pt);
     try {
       const { dir, name } = await docxTarget(pt);
@@ -1266,26 +1270,34 @@ async function discharge(pt) {
 }
 
 // ---------------- vitals (typed in) ----------------
-function vitalsModal(unit, focusId) {
+function vitalsModal(unit, focusId, after) {
   const list = unitPts(unit), K = [["bp", "BP"], ["hr", "Pulse"], ["rr", "RR"], ["temp", "Temp"], ["o2", "O2"], ["bg", "BG"]];
+  const tracksBg = p => p.problems.some(q => q.autoVital === "bg" && !(q.resolved && q.resolved < S.today)) || Object.values(p.vitals || {}).some(v => v?.bg);
   const m = modal(`Vitals · ${unit} · ${md(S.today)}`, `<div>
-    <p class="muted" style="margin-bottom:8px">Type each patient's vitals from the sheet. Tab moves to the next box.</p>
+    <p class="muted" style="margin-bottom:8px">Type each patient's vitals from the sheet. Tab moves to the next box. <b>Refused</b> or <b>UTO</b> fills the whole row (BG only for patients who get BG checks).</p>
     <div style="overflow:auto"><table class="vgrid"><tr><th>Patient</th>${K.map(([, n]) => `<th>${n}</th>`).join("")}<th></th></tr>
-      ${list.map(p => `<tr data-id="${p.id}"><td class="nm">${esc(p.name)}</td>${K.map(([k]) => `<td><input data-k="${k}" value="${esc(p.vitals?.[S.today]?.[k] || "")}" inputmode="${k === "bp" ? "text" : "decimal"}"></td>`).join("")}<td><button class="btn sm" data-clr>Clear</button></td></tr>`).join("")}
+      ${list.map(p => `<tr data-id="${p.id}" data-bg="${tracksBg(p) ? 1 : ""}"><td class="nm">${esc(p.name)}</td>${K.map(([k]) => `<td><input data-k="${k}" value="${esc(p.vitals?.[S.today]?.[k] || "")}" inputmode="${k === "bp" ? "text" : "decimal"}"></td>`).join("")}
+        <td class="vbtns"><button class="btn sm" data-fill="Refused" tabindex="-1">Refused</button><button class="btn sm" data-fill="UTO" tabindex="-1">UTO</button><button class="btn sm" data-clr tabindex="-1">Clear</button></td></tr>`).join("")}
     </table></div></div>`,
     `<button class="btn warn" id="vAll">Clear all</button><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="vSave">Save vitals</button>`, true);
-  $$("[data-clr]", m).forEach(b => b.onclick = () => $$("input", b.closest("tr")).forEach(i => i.value = ""));
-  $("#vAll", m).onclick = () => $$(".vgrid input", m).forEach(i => i.value = "");
+  const mark = tr => { const vals = $$("input", tr).map(i => i.value.trim().toLowerCase()).filter(Boolean); tr.classList.toggle("vref", !!vals.length && vals.every(v => v === "refused" || v === "uto")); };
+  $$("[data-clr]", m).forEach(b => b.onclick = () => { $$("input", b.closest("tr")).forEach(i => i.value = ""); mark(b.closest("tr")); m.dirty = true; });
+  $$("[data-fill]", m).forEach(b => b.onclick = () => { const tr = b.closest("tr");
+    $$("input", tr).forEach(i => { i.value = i.dataset.k === "bg" && !tr.dataset.bg ? "" : b.dataset.fill; }); mark(tr); m.dirty = true; });
+  $$("tr[data-id]", m).forEach(mark);
+  $("#vAll", m).onclick = () => { $$(".vgrid input", m).forEach(i => i.value = ""); $$("tr[data-id]", m).forEach(mark); };
   if (focusId) setTimeout(() => $(`tr[data-id="${focusId}"] input`, m)?.focus(), 80);
   $("#vSave", m).onclick = e => busy(e.currentTarget, async () => {
     for (const tr of $$("tr[data-id]", m)) {
       const pt = findPt(tr.dataset.id), v = {};
       $$("input", tr).forEach(i => { if (i.value.trim()) v[i.dataset.k] = i.value.trim(); });
+      const old = pt.vitals?.[S.today] || {};
+      if (JSON.stringify(old) === JSON.stringify(v)) continue;
       (pt.vitals ||= {})[S.today] = v; E.fillVitals(pt, S.today);
       for (const p of pt.problems) if (p.autoVital) { const e = p.hpi.find(x => x.date === S.today); if (e && e.text === e.auto) e.text = e.auto = dHpi(pt, p, S.today); }
       await saveNow(pt, { why: "Entered vitals" });
     }
-    m.close(); toast("Vitals saved"); route();
+    m.close(true); toast("Vitals saved"); route(); after?.();
   });
 }
 
@@ -1324,35 +1336,232 @@ async function prepUnit(u) {
 }
 
 // ---------------- print ----------------
-async function printPdf(notes, name = "notes.pdf") {
-  const pdf = toPdf(window.jspdf.jsPDF, notes);
+// One print job for the whole unit. Each note's signed page can come off on top (per provider, remembered on every computer).
+async function printPdf(notes, name = "notes.pdf", opts = {}) {
+  const pdf = toPdf(window.jspdf.jsPDF, notes, opts);
   const url = URL.createObjectURL(pdf.output("blob"));
   const f = document.createElement("iframe"); f.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0";
   f.src = url; document.body.append(f);
   f.onload = () => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch { window.open(url); } setTimeout(() => f.remove(), 60000); };
   const t = document.createElement("div"); t.className = "toast"; t.innerHTML = `Print window opening… <a href="${url}" target="_blank" download="${esc(name)}" style="color:inherit;margin-left:8px">Open PDF</a>`;
   document.body.append(t); setTimeout(() => t.remove(), 8000);
+  return pdf.noteInfo;
 }
-function printModal(list) {
+async function printPrefs() { return S.store ? S.store.getShared("printprefs.json", {}) : {}; }
+const sigFirstFor = (pp, prov) => pp.sigFirst?.[prov || "(none)"] ?? true;
+const noVitals = pt => !Object.values(pt.vitals?.[S.today] || {}).some(v => String(v || "").trim());
+const vitalsNote = pt => { const v = Object.values(pt.vitals?.[S.today] || {}).map(x => String(x).toLowerCase());
+  return v.includes("refused") ? "Refused" : v.includes("uto") ? "UTO" : ""; };
+const labsToday = pt => (pt.labs || []).filter(l => l.date === S.today);
+const ekgToday = pt => labsToday(pt).some(l => /\b(EKG|ECG)\b/i.test(l.text + " " + (l.bullets || []).join(" ")));
+// Edits a person made today (not prep, vitals, or billing done by the app or the table).
+const AUTO_LOG = /^(Prepped|Unprep|Entered vitals|Billing|Always 3|Imported)/i;
+const touchedToday = pt => pt.problems.some(p => editedToday(pt, p)) || (pt.log || []).some(l => localDay(l.at) === S.today && !AUTO_LOG.test(l.what || ""));
+function localDay(ms) { const d = new Date(ms); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); }
+const billCode = pt => { const v = String(effBill(pt, S.today) || "").trim(); return /^[123]$/.test(v) ? (pt.admitDate === S.today || pt.status === "admit" ? "9922" : "9923") + v : ""; };
+
+async function printModal(list) {
   if (!list.length) return toast("No notes to print");
+  const unit = list[0].unit, unitAll = unitPts(unit);
+  const pp = await printPrefs();
+  let prov = S.provider || S.days?.[S.today]?.provider || "";
+  const sel = new Set(list.map(p => p.id));
+  const noLabs = unitAll.length > 1 && !unitAll.some(p => labsToday(p).length);
   const items = list.flatMap(pt => loud(flagsFor(pt)).map(f => {
     const p = f.problemId && pt.problems.find(q => q.id === f.problemId);
-    return { pt, f, auto: !!(p && editedToday(pt, p)) };
-  })).concat(list.flatMap(pt => (pt.notes || []).filter(n => n.kind === "quick" && !n.done).map(n => ({ pt, f: { text: "Quick note not written up: " + n.text }, auto: false }))));
-  const m = modal(`Print ${list[0].unit} · ${list.length} notes`, `
-    <div class="lbl">Provider (prints on every note, not saved)</div>
-    <select id="pP" class="btn" style="width:100%;text-align:left"><option value="">(none)</option>${providerNames().map(p => `<option ${(S.provider || S.days?.[S.today]?.provider) === p ? "selected" : ""}>${p}</option>`).join("")}</select>
-    <div class="lbl">Before you print: open flags</div>
-    ${items.length ? items.map((x, i) => `<label class="chk"><input type="checkbox" data-c="${i}" ${x.auto ? "checked" : ""}><div>${esc(x.pt.name)}: ${esc(x.f.text)}<small>${x.auto ? "Edited today, checked for you" : "Not addressed yet"}</small></div></label>`).join("") : `<p class="muted">No open flags. Nice.</p>`}
-    <div class="lbl">Printer</div><p class="muted">You'll pick the printer in the next window. Edge remembers the last one.</p>`,
-    `<button class="btn" data-x>Cancel</button><button class="btn p" id="pGo">Print ${list.length} notes</button>`);
-  const upd = () => { const left = $$("[data-c]", m).filter(c => !c.checked).length; $("#pGo", m).textContent = left ? `Print anyway (${left} unchecked)` : `Print ${list.length} notes`; };
-  $$("[data-c]", m).forEach(c => c.onchange = upd); upd();
-  $("#pGo", m).onclick = async () => {
-    S.provider = $("#pP", m).value; m.close();
-    list.forEach(pt => queueDocx(pt));
-    printPdf(list.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider }))), `${list[0].unit} ${md(S.today).replace("/", "-")}.pdf`);
+    return { pt, text: f.text, auto: !!(p && editedToday(pt, p)) };
+  })).concat(list.flatMap(pt => (pt.notes || []).filter(n => n.kind === "quick" && !n.done).map(n => ({ pt, text: "Quick note not written up: " + n.text, auto: false }))));
+  const row = pt => {
+    const fl = items.map((x, i) => [x, i]).filter(([x]) => x.pt === pt), nv = noVitals(pt), vn = vitalsNote(pt);
+    return `<div class="prow ${sel.has(pt.id) ? "" : "off"}" data-pid="${pt.id}">
+      <label class="pmain"><input type="checkbox" data-sel ${sel.has(pt.id) ? "checked" : ""}><span class="pn">${esc(pt.name)}</span>${admA(pt)}
+        ${touchedToday(pt) ? `<span class="ptag ed">Edited today</span>` : `<span class="ptag">No edits today</span>`}
+        ${vn ? `<span class="ptag">Vitals: ${vn}</span>` : ""}${ekgToday(pt) ? `<span class="ptag ekg">EKG</span>` : ""}</label>
+      ${nv ? `<div class="pflag"><label class="chk"><input type="checkbox" data-ack="v-${pt.id}"><div>Vitals missing<small>Not entered, and not marked Refused or UTO</small></div></label><button class="btn sm" data-vit="${pt.id}">Enter vitals</button></div>` : ""}
+      ${fl.map(([x, i]) => `<div class="pflag"><label class="chk"><input type="checkbox" data-fc="${i}" ${x.auto ? "checked" : ""}><div>${esc(x.text)}<small>${x.auto ? "Edited today, checked for you" : "Not addressed yet"}</small></div></label></div>`).join("")}
+    </div>`; };
+  const m = modal(`${ic("print")} Print ${esc(unit)}`, `<div data-nodirty>
+    <div class="pgrid">
+      <label class="f"><span>Provider (circled on every note)</span><select id="pP"><option value="">(none)</option>${providerNames().map(p => `<option ${prov === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
+      <label class="tgl" title="Remembered for this provider on every computer"><input type="checkbox" id="pSig"><span class="sw"></span><span>Signed page on top<small id="pSigSub"></small></span></label>
+    </div>
+    ${noLabs ? `<div class="al amber pwarn"><div style="flex:1"><b>Any labs to review?</b> None in all of ${esc(unit)} have been added today.</div><button class="btn sm" id="pLabs">Add labs</button><label class="chk" style="border:0;padding:0"><input type="checkbox" data-ack="labs"><div>No labs today</div></label></div>` : ""}
+    <div class="row psel"><b id="pCount"></b><span class="sp"></span><button class="btn sm" id="pAll">Select all</button><button class="btn sm" id="pNone">Deselect all</button></div>
+    <div class="plist">${list.map(row).join("")}</div>
+    <p class="muted small" style="margin-top:10px">One print job. You'll pick the printer in the next window.</p></div>`,
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="pGo">Print</button>`, true);
+  const sigUi = () => { $("#pSig", m).checked = sigFirstFor(pp, prov); $("#pSigSub", m).textContent = $("#pSig", m).checked ? "3 of 3 prints 3, 1, 2" : "Pages print in order"; };
+  sigUi();
+  $("#pP", m).onchange = e => { prov = e.target.value; sigUi(); };
+  $("#pSig", m).onchange = async e => {
+    $("#pSigSub", m).textContent = e.target.checked ? "3 of 3 prints 3, 1, 2" : "Pages print in order";
+    if (!S.store) return;
+    const fresh = await printPrefs(); (fresh.sigFirst ||= {})[prov || "(none)"] = e.target.checked; Object.assign(pp, fresh);
+    try { await S.store.setShared("printprefs.json", fresh); } catch {}
   };
+  const upd = () => {
+    $$(".prow", m).forEach(r => { const on = $("[data-sel]", r).checked; r.classList.toggle("off", !on); on ? sel.add(r.dataset.pid) : sel.delete(r.dataset.pid); });
+    const open = $$(".prow:not(.off) [data-fc], .prow:not(.off) [data-ack], .pwarn [data-ack]", m).filter(c => !c.checked).length;
+    $("#pCount", m).textContent = `${sel.size} of ${list.length} selected`;
+    $("#pGo", m).disabled = !sel.size;
+    $("#pGo", m).textContent = !sel.size ? "Nothing selected" : open ? `Print anyway (${open} unchecked)` : `Print ${sel.size} note${sel.size > 1 ? "s" : ""}`;
+  };
+  m.addEventListener("change", upd); upd();
+  $("#pAll", m).onclick = () => { $$("[data-sel]", m).forEach(c => c.checked = true); upd(); };
+  $("#pNone", m).onclick = () => { $$("[data-sel]", m).forEach(c => c.checked = false); upd(); };
+  $$("[data-vit]", m).forEach(b => b.onclick = () => { m.close(true); vitalsModal(unit, b.dataset.vit, () => printModal(list)); });
+  $("#pLabs", m)?.addEventListener("click", () => { m.close(true); bulkLabs(unit, () => printModal(list)); });
+  $("#pGo", m).onclick = async () => {
+    S.provider = prov; const chosen = list.filter(p => sel.has(p.id)), sigFirst = $("#pSig", m).checked;
+    m.close(true);
+    chosen.forEach(pt => queueDocx(pt));
+    const info = await printPdf(chosen.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider }))), `${unit} ${md(S.today).replace("/", "-")}.pdf`, { sigFirst });
+    const job = { at: Date.now(), by: S.user?.name || "", ids: chosen.map(p => p.id), order: info.map(x => x.order), checked: [] };
+    const printed = { ...(S.days?.[S.today]?.printed || {}), [unit]: job };
+    try { await saveDay({ printed }); } catch {}
+    setTimeout(() => printCheck(unit), 600);
+  };
+}
+
+// After printing: every patient in print order with what can't be circled automatically (billing, admit, EKG), plus check-offs.
+function printCheck(unit) {
+  const job = S.days?.[S.today]?.printed?.[unit];
+  if (!job) return toast(`Nothing printed for ${unit} today yet`);
+  const pts = job.ids.map(findPt).filter(Boolean);
+  const checked = new Set(job.checked || []);
+  const missing = unitPts(unit).filter(p => !job.ids.includes(p.id));
+  const m = modal(`${ic("check")} ${esc(unit)} print check`, `<div data-nodirty>
+    <p class="muted" style="margin:0 0 10px">In the order they came off the printer. Circle what the app can't, then check each one off.</p>
+    <table class="pcheck"><tr><th></th><th>#</th><th>Patient</th><th>Billing</th><th>Admit</th><th>EKG</th><th>Pages</th></tr>
+    ${pts.map((p, i) => { const bc = billCode(p), o = job.order?.[i];
+      return `<tr class="${checked.has(p.id) ? "done" : ""}" data-pid="${p.id}"><td><input type="checkbox" ${checked.has(p.id) ? "checked" : ""}></td><td class="muted">${i + 1}</td>
+        <td class="nm">${esc(p.name)}</td><td>${bc ? `<b>${bc}</b>` : `<span class="muted">not set</span>`}</td>
+        <td>${p.status === "admit" || p.admitDate === S.today ? admA({ status: "admit" }) : ""}</td>
+        <td>${ekgToday(p) ? `<span class="ptag ekg">93010</span>` : ""}</td><td class="muted small">${o && o.length > 1 ? o.join(", ") : o ? "1" : ""}</td></tr>`; }).join("")}
+    </table>
+    ${missing.length ? `<div class="al amber" style="margin-top:10px">Not in this print: ${missing.map(p => esc(p.name)).join(", ")}</div>` : ""}
+    <p class="muted small" style="margin-top:8px">Printed ${new Date(job.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${job.by ? " by " + esc(job.by) : ""}.</p></div>`,
+    `<span class="muted small" id="pcN"></span><span class="sp"></span><button class="btn p" data-x>Done</button>`, true);
+  const upd = () => { $("#pcN", m).textContent = `${checked.size} of ${pts.length} checked`; };
+  upd();
+  $$("tr[data-pid] input", m).forEach(c => c.onchange = () => {
+    const id = c.closest("tr").dataset.pid; c.checked ? checked.add(id) : checked.delete(id); c.closest("tr").classList.toggle("done", c.checked); upd();
+    const printed = { ...(S.days?.[S.today]?.printed || {}) }; printed[unit] = { ...job, checked: [...checked] }; saveDay({ printed });
+  });
+}
+
+// ---------------- bulk labs ----------------
+// The morning lab review for a whole unit on one screen: pending labs up front, diagnoses small unless they're waiting on a lab,
+// edit a diagnosis's plan for today or add a lab-only diagnosis (those go in the Plan only), then save everything at once.
+function bulkLabs(unit, after) {
+  const list = unitPts(unit), d = md(S.today);
+  const live = pt => pt.problems.filter(q => q.start <= S.today && !(q.resolved && q.resolved < S.today));
+  const planToday = (pt, q) => q.start === S.today ? (q.planOpen || "") : (q.plan.find(e => e.date === S.today)?.text ?? dPlan(pt, q, S.today));
+  const card = pt => {
+    const pend = pendingLabs(pt), waitIds = new Set(pend.map(x => x.problemId).filter(Boolean)), done = labsToday(pt);
+    const dx = live(pt).sort((a, b) => waitIds.has(b.id) - waitIds.has(a.id));
+    return `<div class="blpt" data-pid="${pt.id}">
+      <div class="blh"><span class="pn">${esc(pt.name)}</span>${admA(pt)}<span class="sp"></span>${done.length ? `<span class="ptag ed" title="${esc(done.map(l => l.text).join(" · "))}">${done.length} added today</span>` : ""}</div>
+      ${pend.length ? `<div class="blpend">${pend.map(x => `<button class="blwait" data-lab="${esc(x.name)}" title="Add to today's line">${esc(x.name)}<small>pending${x.dx ? " · " + esc(x.dx) : ""}</small></button>`).join("")}</div>` : ""}
+      <div class="blrow"><input data-line placeholder="e.g. CMP and CBC Reviewed ${d}." autocomplete="off"><textarea data-ab rows="1" placeholder="Abnormal values, one per line"></textarea></div>
+      <div class="bldx">${dx.map(q => `<button class="bdx ${waitIds.has(q.id) ? "wait" : ""}" data-dx="${q.id}">${esc(q.name)}${waitIds.has(q.id) ? `<small>awaiting ${esc(pend.filter(x => x.problemId === q.id).map(x => x.name).join(", "))}</small>` : ""}</button>`).join("")}
+        <button class="bdx bnewdx" data-new>${ic("plus", 11)} New diagnosis from labs</button></div>
+      <div class="bled">${dx.map(q => `<div class="f" data-edx="${q.id}" hidden><span>${esc(q.name)} · plan ${d}</span><input value="${esc(planToday(pt, q))}" data-orig="${esc(planToday(pt, q))}"></div>`).join("")}
+        <div class="bnew" hidden><div class="grid2"><div class="f"><span>New diagnosis (Plan only)</span><input data-nn placeholder="e.g. Hypokalemia"></div><div class="f"><span>Plan</span><input data-np placeholder="K 3.2 on ${d}. Will treat with…"></div></div></div></div>
+    </div>`; };
+  const m = modal(`${ic("labs")} Labs · ${esc(unit)} · ${d}`, `
+    <div class="blquick"><input id="blQ" placeholder="Same line for many? e.g. CMP, CBC, A1c, Lipid Panel, and TSH Reviewed ${d}." autocomplete="off"><button class="btn" id="blFill">Fill empty lines</button></div>
+    <p class="muted small" style="margin:-2px 0 10px">Tap a pending lab to add it. Tap a diagnosis to change today's plan for it. A diagnosis found only on labs goes in the Plan, not the HPI.</p>
+    <div class="bllist">${list.map(card).join("") || `<p class="muted">No patients on ${esc(unit)}.</p>`}</div>`,
+    `<span class="muted small" id="blN"></span><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="blGo">Save labs</button>`, true);
+  const changed = c => $("[data-line]", c).value.trim() || $("[data-ab]", c).value.trim() || $("[data-nn]", c).value.trim()
+    || $$("[data-edx] input", c).some(i => i.value !== i.dataset.orig);
+  const upd = () => { const n = $$(".blpt", m).filter(changed).length; $("#blN", m).textContent = n ? `${n} patient${n > 1 ? "s" : ""} changed` : "";
+    $("#blGo", m).textContent = n ? `Save labs for ${n}` : "Save labs"; $$(".blpt", m).forEach(c => c.classList.toggle("chg", !!changed(c))); };
+  const grow = t => { t.style.height = "auto"; t.style.height = t.scrollHeight + 2 + "px"; };
+  m.addEventListener("input", e => { if (e.target.matches("textarea")) grow(e.target); upd(); });
+  $("#blFill", m).onclick = () => { const q = $("#blQ", m).value.trim(); if (!q) return $("#blQ", m).focus();
+    $$("[data-line]", m).forEach(i => { if (!i.value.trim()) i.value = q; }); m.dirty = true; upd(); };
+  $$("[data-lab]", m).forEach(b => b.onclick = () => {
+    const i = $("[data-line]", b.closest(".blpt")), name = b.dataset.lab;
+    const parts = t => t.trim().replace(/\s*Reviewed\s+\d+\/\d+\.?\s*$/i, "").split(/\s*,\s*(?:and\s+)?|\s+and\s+/).filter(Boolean);
+    const items = parts(i.value), have = new Set(items.map(x => x.toLowerCase()));
+    const add = parts(name).filter(x => !have.has(x.toLowerCase()));
+    if (add.length) {
+      items.push(...add);
+      const joined = items.length < 3 ? items.join(" and ") : items.slice(0, -1).join(", ") + ", and " + items.at(-1);
+      i.value = `${joined} Reviewed ${d}.`;
+    }
+    b.classList.add("on"); m.dirty = true; upd(); i.focus();
+  });
+  $$("[data-dx]", m).forEach(b => b.onclick = () => { const f = $(`[data-edx="${b.dataset.dx}"]`, b.closest(".blpt")); f.hidden = !f.hidden; b.classList.toggle("on", !f.hidden); if (!f.hidden) $("input", f).focus(); });
+  $$("[data-new]", m).forEach(b => b.onclick = () => { const f = $(".bnew", b.closest(".blpt")); f.hidden = !f.hidden; b.classList.toggle("on", !f.hidden); if (!f.hidden) $("[data-nn]", f).focus(); });
+  upd();
+  $("#blGo", m).onclick = e => busy(e.currentTarget, async () => {
+    const touched = [];
+    for (const c of $$(".blpt", m).filter(changed)) {
+      const pt = findPt(c.dataset.pid); pt.labs ||= [];
+      const bullets = $("[data-ab]", c).value.split("\n").map(x => x.trim()).filter(Boolean);
+      let line = $("[data-line]", c).value.trim();
+      if (!line && bullets.length) line = `Labs Reviewed ${d}.`;
+      if (line && !pt.labs.some(l => l.date === S.today && l.text === line)) {
+        pt.labs.push({ date: S.today, text: line, bullets });
+        pt.pendingLabs = (pt.pendingLabs || []).filter(x => !line.toLowerCase().includes(x.toLowerCase()));
+      }
+      for (const i of $$("[data-edx] input", c)) {
+        if (i.value === i.dataset.orig) continue;
+        const q = pt.problems.find(x => x.id === i.closest("[data-edx]").dataset.edx);
+        if (q.start === S.today) q.planOpen = i.value.trim(); else { const en = todayEntry(pt, q, "plan"); en.text = i.value.trim(); }
+      }
+      const nn = $("[data-nn]", c).value.trim();
+      if (nn) pt.problems.push({ id: uid(), name: nn, symptom: nn.toLowerCase(), start: S.today, hpiOpen: null, planOpen: $("[data-np]", c).value.trim() || "Will continue to monitor",
+        meds: [], hpi: [], plan: [], planOnly: true });
+      touched.push(pt);
+    }
+    if (!touched.length) { m.close(true); return; }
+    await pool(touched, 4, pt => saveNow(pt, { why: "Labs reviewed" }));
+    m.close(true); toast(`Labs saved for ${touched.length} patient${touched.length > 1 ? "s" : ""}`); route(); after?.();
+  });
+}
+
+// ---------------- bulk admits ----------------
+// Type the morning's admits as a list; each gets an empty H&P marked "Needs prep" until someone fills in the form.
+function bulkAdmits() {
+  const lastUnit = () => $$(".barow select").at(-1)?.value || UNITS[0];
+  const rowHtml = u => `<div class="barow"><input placeholder="Last, First" data-n autocomplete="off"><select>${UNITS.map(x => `<option ${x === u ? "selected" : ""}>${x}</option>`).join("")}</select><button class="btn sm" data-rm title="Remove">${ic("x", 12)}</button></div>`;
+  const m = modal(`${ic("hp")} Add admits`, `
+    <p class="muted" style="margin-bottom:10px">One per line. Enter jumps to a new line. Each one gets an H&amp;P file in the team folder marked <b>Needs prep</b>.</p>
+    <div id="baRows">${rowHtml(UNITS[0])}</div>
+    <button class="btn sm" id="baMore">${ic("plus", 13)} Add another</button>
+    <p class="warnbox" id="baDup" hidden></p>`,
+    `<button class="btn" data-x>Cancel</button><button class="btn p" id="baGo">Add admits</button>`);
+  const rows = $("#baRows", m);
+  const wire = () => { $$("[data-rm]", m).forEach(b => b.onclick = () => { if ($$(".barow", m).length > 1) b.closest(".barow").remove(); count(); }); };
+  const add = () => { rows.insertAdjacentHTML("beforeend", rowHtml(lastUnit())); wire(); $$("[data-n]", m).at(-1).focus(); count(); };
+  const names = () => $$(".barow", m).map(r => ({ name: $("[data-n]", r).value.trim().replace(/\s*,\s*/, ", "), unit: $("select", r).value })).filter(x => x.name);
+  const count = () => {
+    const n = names(), dup = n.filter(x => S.pts.some(p => active(p) && p.name.toLowerCase() === x.name.toLowerCase()));
+    $("#baGo", m).textContent = n.length ? `Add ${n.length} admit${n.length > 1 ? "s" : ""}` : "Add admits";
+    $("#baDup", m).hidden = !dup.length; $("#baDup", m).innerHTML = dup.length ? `Already in the hospital: ${dup.map(x => esc(x.name)).join(", ")}. They'll be skipped.` : "";
+  };
+  $("#baMore", m).onclick = add; wire();
+  m.addEventListener("input", count);
+  rows.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches("[data-n]")) { e.preventDefault(); const all = $$("[data-n]", m); all.indexOf(e.target) === all.length - 1 ? add() : all[all.indexOf(e.target) + 1].focus(); } });
+  setTimeout(() => $("[data-n]", m)?.focus(), 60);
+  $("#baGo", m).onclick = e => busy(e.currentTarget, async () => {
+    const list = names().filter(x => !S.pts.some(p => active(p) && p.name.toLowerCase() === x.name.toLowerCase()));
+    if (!list.length) return toast("Type at least one name");
+    const made = [];
+    for (const { name, unit } of list) {
+      const rec = { id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + uid(), status: "admit", needsPrep: true, name, file: name, unit,
+        dob: "", mrn: "", admitDate: S.today, admitTime: "", age: "", sex: "", adolescent: false, psych: { dx: "", taper: "safety" },
+        hp: { allergies: "NKA", scribe: S.user?.name || "", meds: [] }, blurb: "", problems: [], vitals: {}, times: {}, refusing: [], labs: [], pendingLabs: [] };
+      E.assignTimes([rec], S.today, rec.id + S.today);
+      S.pts.push(rec); made.push(rec);
+    }
+    await pool(made, 4, pt => saveNow(pt, { why: "Added admit (needs prep)" }));
+    m.close(true); toast(`Added ${made.length} admit${made.length > 1 ? "s" : ""}`); route();
+  });
 }
 
 // ---------------- H&P form ----------------
@@ -1415,6 +1624,7 @@ function hpForm(id) {
       age, sex: $("#hSex").value, adolescent: !!age && age < 18, psych: { dx: $("#hDx").value.trim(), taper: $("#hTap").value } });
     rec.hp = { allergies: $("#hAl").value, scribe: $("#hScr").value, meds: $("#hMeds").value.split("\n").map(s => s.trim()).filter(Boolean),
       surgical: $("#hSurg").value, alcohol: $("#hAlc").value, nicotine: $("#hNic").value, drugs: $("#hDr").value, general: $("#hGen").value };
+    delete rec.needsPrep;
     rec.blurb = rec.blurb || `Patient is a ${age} year-old ${rec.sex} who admitted to Aspen Grove Behavioral Hospital for inpatient treatment due to ${rec.psych.dx}.`;
     const vv = {}; $$("[data-v]").forEach(i => { if (i.value.trim()) vv[i.dataset.v] = i.value.trim(); }); rec.vitals[admit] = vv;
     rec.labs = $("#hLab").value.trim() ? [{ date: admit, text: $("#hLab").value.trim(), bullets: [] }] : [];
@@ -1530,8 +1740,10 @@ const HELP = {
   unit: [
     ["#prep", "Prep", "Copies every note forward to tomorrow. Anything changed today shows up for review first."],
     ["#qn", "Make a Note", "Jot something fast on rounds. A yellow dot follows that patient until it's written up."],
-    ["#vit", "Vitals", "Type the unit's vitals in one grid."],
-    ["#prn", "Print unit", "Pick the provider, check open flags, then print every note as one job."],
+    ["#vit", "Vitals", "Type the unit's vitals in one grid. Refused or UTO fills a whole row."],
+    ["#labsU", "Labs", "Review labs for the whole unit at once: pending labs up top, fix a diagnosis's plan, or add a lab-only diagnosis. One save."],
+    ["#prn", "Print unit", "Pick who to print, check flags (missing vitals, no labs today), then print as one job. The signed page can come off on top."],
+    ["#pchk", "Print check", "After printing: billing, admits and EKGs to circle, in print order, with check-offs."],
     [".list", "Patients", "Tap a name to open their note. Red and yellow text means something needs a look."],
   ],
   pt: [
