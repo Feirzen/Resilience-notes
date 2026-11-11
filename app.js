@@ -133,10 +133,18 @@ function track(id) {
 function finish(pt) { SV.good.set(pt.id, structuredClone(pt)); if (SV.pending.delete(pt.id)) SV.done++; saveBanner(); }
 function fail(pt, e, stage) { SV.pending.delete(pt.id); SV.failed.set(pt.id, { pt, e, stage }); console.warn("save failed", pt.name, e); saveBanner(); }
 function save(pt) { return saveNow(pt); }
+// If a save for this patient is already waiting its turn, it will write the newest version anyway, so don't queue a second one.
+const waiting = new Map();
 function saveNow(pt, { docx = true, why = "Edited note" } = {}) {
   clearTimeout(timers[pt.id]);
-  logEdit(pt, why); track(pt.id); SV.failed.delete(pt.id);
-  return enqueue(pt, async () => {
+  logEdit(pt, why); SV.failed.delete(pt.id); pinTab(pt.id, why);
+  const w = waiting.get(pt.id);
+  if (w) { if (docx) w.docx = true; return w.promise; }
+  track(pt.id);
+  const job = { docx };
+  waiting.set(pt.id, job);
+  return job.promise = enqueue(pt, async () => {
+    waiting.delete(pt.id); docx = job.docx;
     pt.updated = Date.now();
     try { const r = await withTimeout(S.store.savePatient(pt), SV.slow ? 60000 : 15000, "Saving the note"); if (r === "conflict") { SV.pending.delete(pt.id); saveBanner(); return conflict(pt); } }
     catch (e) { return fail(pt, e, "data"); }
@@ -179,6 +187,8 @@ async function runDocx() {
   docxRunning = false; saveBanner();
 }
 function saveBanner() {
+  $$("#otabs .ot").forEach(a => { const id = a.dataset.tab, pend = SV.pending.has(id) || waiting.has(id) || (S.snap?.id === id && S.snap.dirty), d = $(".odot", a);
+    if (pend && !d) a.insertAdjacentHTML("afterbegin", `<i class="odot"></i>`); if (!pend && d) d.remove(); });
   let el = $("#saveBar");
   const busyN = SV.pending.size, failed = [...SV.failed.values()];
   if (!busyN && !failed.length) { if (el && !el.dataset.done) { el.dataset.done = "1"; el.classList.remove("bad"); el.innerHTML = `${ic("check", 15)} All saved`; setTimeout(() => { if (!SV.pending.size && !SV.failed.size) el.remove(); }, 1400); } return; }
@@ -257,12 +267,53 @@ function shell() {
     ${S.store ? `<nav class="tabs"><a href="#home" class="${!curUnit && !hash.startsWith("pt-") ? "on" : ""}">HOME</a>${UNITS.map(u => {
       const red = counts[u].some(p => flagsFor(p).some(f => f.level === "red"));
       return `<a href="#unit-${u}" class="${curUnit === u ? "on" : ""}">${u.toUpperCase()}<i>${counts[u].length}</i>${red ? `<span class="rd"></span>` : ""}</a>`;
-    }).join("")}</nav>` : ""}`;
+    }).join("")}</nav>${tabStrip(hash)}` : ""}`;
+  wireTabs(); setTopH();
   if ($("#oldNotes")) $("#oldNotes").onclick = () => S.viewDate ? (S.viewDate = null, route()) : oldNotesModal();
   $("#gear").onclick = toggleTray;
   $("#helpB")?.addEventListener("click", helpMenu);
   $("#back")?.addEventListener("click", goBack);
 }
+// ---------------- open-note tabs ----------------
+// Like browser tabs, but instant: every patient is already loaded. The note you're on shows as a light "preview" tab;
+// it stays as a real tab once you change something (or Ctrl/middle-click a name to open it without leaving the page).
+// Tabs stay until you close them, so half-finished notes don't get forgotten. Alt+1…9 jumps to a tab.
+let TABS = []; try { TABS = JSON.parse(sessionStorage.getItem("rn-tabs") || "[]"); } catch {}
+const saveTabs = () => { try { sessionStorage.setItem("rn-tabs", JSON.stringify(TABS)); } catch {} };
+const AUTO_WHY = /^(Prepped|Unprep|Entered vitals|Billing|Always 3|Imported|Labs reviewed|Added admit)/i;
+function pinTab(id, why = "") {
+  if (TABS.includes(id) || AUTO_WHY.test(why) || location.hash !== "#pt-" + id) return;
+  TABS.push(id); saveTabs(); const st = $("#otabs"); if (st) { st.outerHTML = tabStrip(location.hash.slice(1)); wireTabs(); setTopH(); }
+}
+function tabStrip(hash) {
+  TABS = TABS.filter(id => findPt(id)); const cur = hash.startsWith("pt-") ? hash.slice(3) : null;
+  const ids = [...TABS, ...(cur && !TABS.includes(cur) && findPt(cur) ? [cur] : [])];
+  if (!ids.length) return `<div class="otabs" id="otabs" hidden></div>`;
+  return `<div class="otabs" id="otabs">${ids.map((id, i) => { const p = findPt(id), pend = SV.pending.has(id) || waiting.has(id) || (S.snap?.id === id && S.snap.dirty);
+    return `<a href="#pt-${id}" class="ot ${id === cur ? "on" : ""} ${TABS.includes(id) ? "" : "pv"}" data-tab="${id}" title="${esc(p.name)} · ${p.unit}${i < 9 ? ` (Alt+${i + 1})` : ""}">
+      ${pend ? `<i class="odot"></i>` : ""}<span>${esc(p.name)}</span><small>${p.unit}</small><button class="ox" data-close="${id}" aria-label="Close tab">${ic("x", 11)}</button></a>`; }).join("")}
+    ${TABS.length > 1 ? `<button class="oclear" id="oClear">Close all</button>` : ""}</div>`;
+}
+const setTopH = () => requestAnimationFrame(() => { const t = $("#top"); if (t) document.documentElement.style.setProperty("--toph", t.offsetHeight + "px"); });
+function wireTabs() {
+  $$("[data-close]").forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); const id = b.dataset.close;
+    const i = TABS.indexOf(id); TABS = TABS.filter(x => x !== id); saveTabs();
+    if (location.hash === "#pt-" + id) location.hash = TABS.length ? "pt-" + TABS[Math.min(i, TABS.length - 1)] : "unit-" + (findPt(id)?.unit || ""); else shell(); });
+  $("#oClear")?.addEventListener("click", () => { TABS = []; saveTabs(); shell(); });
+}
+// Ctrl/Cmd-click or middle-click a patient anywhere: open it as a tab without leaving the page.
+function openInTab(e) {
+  const a = e.target.closest('a[href^="#pt-"]'); if (!a || a.classList.contains("ot")) return;
+  if (!(e.ctrlKey || e.metaKey || e.button === 1)) return;
+  e.preventDefault(); const id = a.getAttribute("href").slice(4); if (!findPt(id)) return;
+  if (!TABS.includes(id)) { TABS.push(id); saveTabs(); }
+  const st = $("#otabs"); if (st) { st.outerHTML = tabStrip(location.hash.slice(1)); wireTabs(); setTopH(); }
+  toast(`${findPt(id).name} opened in a tab`, 1400);
+}
+document.addEventListener("click", openInTab, true);
+document.addEventListener("auxclick", openInTab, true);
+document.addEventListener("keydown", e => { if (e.altKey && /^[1-9]$/.test(e.key)) { const st = $$("#otabs .ot")[+e.key - 1]; if (st) { e.preventDefault(); location.hash = st.getAttribute("href").slice(1); } } });
+
 // Feedback lives in the team folder, so it's only offered when a real team folder is open.
 const feedbackOn = () => !!S.store && !S.store.demo && !!S.user;
 const seesFeedback = () => isSup() || !!users().find(u => u.id === S.user?.id)?.feedback;
@@ -352,6 +403,7 @@ window.addEventListener("hashchange", () => {
   const open = $$(".scrim").filter(x => x.close);
   if (open.some(x => x.dirty)) { history.replaceState(null, "", lastHash || "#home"); return toast("Finish or close the open window first"); }
   open.forEach(x => x.close(true));
+  if (S.snap?.dirty && !S.formDirty) { const pt = findPt(S.snap.id); S.snap = null; S.open = null; if (pt) { saveNow(pt); toast(`${pt.name}: saved in the background`, 1600); } }
   if (isDirty()) { const want = location.hash; history.replaceState(null, "", lastHash || "#home"); leaveGuard(() => { lastHash = want; location.hash = want; }); return; }
   lastHash = location.hash; S.open = null; route();
 });
@@ -413,6 +465,8 @@ window.addEventListener("focus", async () => {        // pick up other computers
 });
 
 // Small shared badges: circled A for a new admit, teal count for notes to write up.
+// An H&P only counts as ready when a scribe says so (older H&Ps made before this setting count as ready).
+const hpReady = p => p.hpReady === true || (p.hpReady === undefined && p.needsPrep === undefined);
 const admA = p => p.status === "admit" ? `<span class="admA" title="New admit (H&P)" aria-label="New admit"><svg viewBox="0 0 16 16" width="16" height="16"><circle cx="8" cy="8" r="8"/><path d="M5.1 11.6 8 4.4l2.9 7.2M6.15 9.1h3.7"/></svg></span>` : "";
 const qnTag = p => { const n = (p.notes || []).filter(x => x.kind === "quick" && !x.done).length; return n ? `<span class="qtag" title="${n} note${n > 1 ? "s" : ""} to write up">${ic("note", 12)}${n}</span>` : ""; };
 // ---------------- home dashboard ----------------
@@ -440,7 +494,7 @@ function buildCount(d = S.today) {
   const c = k => `${k}: ${n[k] || 0}`;
   return [day.provider || "(provider)", `${day.in || "____"} - ${day.out || "____"} ${fullMDY(d)}`, "",
     ...(n["99231"] || true ? [c("99231")] : []), c("99232"), c("99233"), "", ...(n["99221"] ? [c("99221")] : []), c("99222"), c("99223"), "",
-    `EKG - 93010: ${day.ekg || 0}`].join("\n");
+    `EKG - 93010: ${day.ekg || ekgCount()}`].join("\n");
 }
 function countModal() {
   const m = modal(`${ic("count")} Count for ` + fullMDY(S.today), `<p class="muted" style="margin-bottom:8px">Check it over. You can fix anything right here before saving.</p>
@@ -572,13 +626,13 @@ function home() {
       <label><span>Provider today</span><select id="dP"><option value="">Pick…</option>${providerNames().map(n => `<option ${day.provider === n ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>
       <label><span>In</span><input id="dIn" value="${esc(day.in || "")}" placeholder="0800" maxlength="4" inputmode="numeric"></label>
       <label><span>Out</span><input id="dOut" value="${esc(day.out || "")}" placeholder="1500" maxlength="4" inputmode="numeric"></label>
-      <label><span>EKGs reviewed</span><input id="dE" value="${esc(day.ekg || "")}" placeholder="0" maxlength="3" inputmode="numeric"></label>
+      <label><span>EKGs reviewed</span><input id="dE" value="${esc(day.ekg || "")}" placeholder="${ekgCount()}" maxlength="3" inputmode="numeric"></label>
       <button class="btn go" id="genC">${ic("count")} Generate count</button>
     </div>
     <div class="card census" data-help="census">
       <div class="cz"><b>${live.length}</b><span>in house</span></div>
       <div class="cz"><b>${admits.length}</b><span>admit${admits.length === 1 ? "" : "s"} today</span></div>
-      <div class="cadm">${admits.map(p => `<a href="#${p.needsPrep ? "hp-" : "pt-"}${p.id}">${admA(p)}${esc(p.name)}<i>${p.unit}</i>${p.status === "admit" ? (p.needsPrep ? `<b class="needprep">Needs prep</b>` : `<b class="prepok">Ready</b>`) : ""}</a>`).join("") || `<span class="muted">No new admits yet</span>`}
+      <div class="cadm">${admits.map(p => `<a href="#${hpReady(p) ? "pt-" : "hp-"}${p.id}">${admA(p)}${esc(p.name)}<i>${p.unit}</i>${p.status === "admit" ? (hpReady(p) ? `<b class="prepok">Ready</b>` : `<b class="needprep">Needs prep</b>`) : ""}</a>`).join("") || `<span class="muted">No new admits yet</span>`}
         <button class="btn sm addadm" id="addAdm">${ic("plus", 13)} Add admits</button></div>
     </div>
     <div class="card fuwrap" data-help="units">
@@ -586,7 +640,7 @@ function home() {
       <div class="furows">${all.map(([u, x]) => `<a class="fur" href="#unit-${u}"><span class="fun">${u}</span><span class="fuc">${x.l.length}</span>
         <span class="fut">${x.r ? `<span class="fpill r">${x.r} follow-up</span>` : ""}${x.a ? `<span class="fpill a">${x.a} to check</span>` : ""}${x.q ? `<span class="fpill q">${x.q} note${x.q > 1 ? "s" : ""}</span>` : ""}${x.adm ? `<span class="fpill n">${x.adm} admit</span>` : ""}${!x.r && !x.a && !x.q && !x.adm ? `<span class="muted">All clear</span>` : ""}</span></a>`).join("")}</div>
     </div>
-    <div class="row" style="margin:20px 0 8px"><h2 style="margin:0">All patients</h2><span class="sp"></span><button class="btn sm" id="ovAll">${S.ovAll ? "Collapse all" : "Expand all"}</button></div>
+    <div class="row" style="margin:20px 0 8px"><h2 style="margin:0">All patients</h2><span class="sp"></span><button class="btn sm" id="billAll">${ic("count", 13)} Billing</button><button class="btn sm" id="ovAll">${S.ovAll ? "Collapse all" : "Expand all"}</button></div>
     <div class="card" id="ov" data-help="table">${UNITS.map(u => {
       const l = unitPts(u), open = S.ovAll || S.expanded?.has(u);
       const nFlag = l.filter(p => loud(flagsFor(p)).length).length;
@@ -630,6 +684,7 @@ function home() {
   $$("[data-aok]").forEach(b => b.onclick = async () => { await annSave(list => { const a = list.find(x => x.id === b.dataset.aok); if (a) (a.seen ||= []).push(S.user?.id); }); home(); });
   $$("[data-adel]").forEach(b => b.onclick = async () => { if (await ask("Delete announcement?", "Removes it for everyone.", "Delete")) { await annSave(list => { const i = list.findIndex(x => x.id === b.dataset.adel); if (i >= 0) list.splice(i, 1); }); home(); } });
   $$(".ovh").forEach(h => h.onclick = () => { const u = h.parentElement.dataset.u; (S.expanded ||= new Set()).has(u) ? S.expanded.delete(u) : S.expanded.add(u); h.parentElement.classList.toggle("open"); });
+  $("#billAll").onclick = () => billingModal();
   $("#ovAll").onclick = () => { S.ovAll = !S.ovAll; if (!S.ovAll) S.expanded = new Set(); home(); };
   $$("tr[data-pt]").forEach(tr => {
     const pt = findPt(tr.dataset.pt);
@@ -726,14 +781,14 @@ function unitView(u) {
     && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.today)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
-      <button class="btn" id="qn">${ic("note")} Make a Note</button><button class="btn" id="vit">${ic("vitals")} Vitals</button><button class="btn" id="labsU">${ic("labs")} Labs</button><button class="btn" id="prn">${ic("print")} Print unit</button>${S.days?.[S.today]?.printed?.[u] ? `<button class="btn" id="pchk" title="After printing: billing, admits, EKGs, check-offs">${ic("check")} Print check</button>` : ""}<button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
+      <button class="btn" id="qn">${ic("note")} Make a Note</button><button class="btn" id="vit">${ic("vitals")} Vitals</button><button class="btn" id="labsU">${ic("labs")} Labs</button><button class="btn" id="prn">${ic("print")} Print unit</button><button class="btn" id="bill">${ic("count")} Billing</button><button class="btn go" id="prep">${preppedCount && preppedCount === l.filter(p => p.status !== "admit").length ? `✓ Prepped for ${md(tmw)}` : `Prep for ${md(tmw)}`}</button></div>
     ${preppedCount ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">${preppedCount} of ${l.length} notes prepped for ${md(tmw)}.<span class="sp"></span><button class="btn sm" id="unprepU">Unprep ${u}</button></div>` : ""}
 
     ${behind.length ? `<div class="al amber" style="margin-bottom:10px">${behind.length} note${behind.length > 1 ? "s aren't" : " isn't"} prepped for today (${md(S.date)}).<span class="sp"></span><button class="btn sm" id="catch">Prep from ${md(y)}</button></div>` : ""}
     <div class="card list">${l.length ? l.map(p => {
       const fs = loud(flagsFor(p)); const top = fs.find(f => f.level === "red") || fs[0];
       const qn = (p.notes || []).filter(n => n.kind === "quick" && !n.done).length;
-      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="admpill">${ic("hp", 12)} New admit</span>${p.needsPrep ? `<b class="needprep">Needs prep</b>` : ""}` : ""}${qn ? `<span class="qpill">${ic("note", 12)} ${qn} note${qn > 1 ? "s" : ""} to write up</span>` : ""}</span>
+      return `<a class="it" href="#pt-${p.id}"><span class="nm">${esc(p.name)}${p.status === "admit" ? `<span class="admpill">${ic("hp", 12)} New admit</span>${!hpReady(p) ? `<b class="needprep">Needs prep</b>` : ""}` : ""}${qn ? `<span class="qpill">${ic("note", 12)} ${qn} note${qn > 1 ? "s" : ""} to write up</span>` : ""}</span>
         <span class="mk ${top ? (top.level === "red" ? "r" : "a") : "q"}">${top ? esc(top.text) + (fs.length > 1 ? ` +${fs.length - 1}` : "") : "ready"}</span></a>`;
     }).join("") : `<div class="it"><span class="muted">No patients on ${u}.</span></div>`}</div>
     ${(() => { const dc = S.pts.filter(p => p.unit === u && p.status === "discharged").sort((a, b) => (b.dischargedOn || "").localeCompare(a.dischargedOn || ""));
@@ -749,7 +804,7 @@ function unitView(u) {
   $("#qn").onclick = () => stickyModal(l);
   $$(".dcbox .it").forEach(a => a.addEventListener("click", () => {}));
   $("#prn").onclick = () => printModal(unitPts(u));
-  $("#pchk")?.addEventListener("click", () => printCheck(u));
+  $("#bill").onclick = () => billingModal(u);
   $("#prep").onclick = e => busy(e.currentTarget, () => prepUnit(u));
   $("#catch")?.addEventListener("click", e => busy(e.currentTarget, async () => {
     const pg = progress(`Prepping ${u} for ${md(S.today)}`);
@@ -839,6 +894,7 @@ function ptView(id) {
     <div style="min-width:0">
       ${ro ? `<div class="al amber" style="margin-bottom:10px">Old version: how this note read on ${md(S.viewDate)}. Read only.<span class="sp"></span><button class="btn sm" id="reprint">${ic("print", 13)} Print this version</button><button class="btn sm" id="backNow">Back to current</button></div>`
         : lastDate(pt) > S.today ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Prepped for ${md(lastDate(pt))}.<span class="sp"></span><button class="btn sm" id="unprepP">Unprep</button></div>` : ""}
+      ${!ro && pt.status === "admit" ? `<div class="al ${hpReady(pt) ? "" : "amber"} hpst" style="margin-bottom:10px;${hpReady(pt) ? "background:var(--hover);border-color:var(--accent)" : ""}">${hpReady(pt) ? `<b class="prepok" style="margin:0">Ready</b> H&amp;P is ready for the provider.` : `<b class="needprep" style="margin:0">Needs prep</b> H&amp;P still pending.`}<span class="sp"></span><button class="btn sm" id="hpTog">${hpReady(pt) ? "Mark pending" : "Mark ready to see"}</button></div>` : ""}
       ${ro ? "" : `<div class="tools" data-help="tools">
         <button class="btn go big" id="addP">${ic("plus")} Add diagnosis</button>
         <button class="btn ic" id="labs">${ic("labs")}<span>Add labs</span></button>
@@ -909,6 +965,7 @@ function ptView(id) {
   $("#stk")?.addEventListener("click", () => stickyModal([pt]));
   $("#labs")?.addEventListener("click", () => labsModal(pt));
   $("#reprint")?.addEventListener("click", () => reprintModal(pt));
+  $("#hpTog")?.addEventListener("click", async () => { pt.hpReady = !hpReady(pt); delete pt.needsPrep; await saveNow(pt, { docx: false, why: pt.hpReady ? "H&P marked ready" : "H&P marked pending" }); route(); });
   $("#moreB")?.addEventListener("click", e => { e.stopPropagation(); const m = $("#moreM"); m.hidden = !m.hidden; if (!m.hidden) setTimeout(() => document.addEventListener("click", () => { m.hidden = true; }, { once: true })); });
   $$("[data-m]").forEach(b => b.onclick = () => { const k = b.dataset.m;
     if (k === "vit") vitalsModal(pt.unit, pt.id); if (k === "pe") peModal(pt); if (k === "undc") undischarge(pt); if (k === "info") infoModal(pt); if (k === "psy") psychModal(pt); if (k === "hp") location.hash = "hp-" + pt.id; if (k === "dc") discharge(pt);
@@ -1099,7 +1156,7 @@ function openEditor(pt, pid) {
       <span class="muted" id="eUns" ${S.snap?.dirty ? "" : "hidden"}>Not saved yet</span><button class="btn" id="eCancel">Cancel</button><button class="btn p ${S.snap?.dirty ? "go" : ""}" id="eDone">Save</button></div>`;
   slot.append(ed); setTimeout(layoutComments, 30);
   ed.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  const changed = () => { refreshParas(pt, p); S.snap.dirty = true; $("#eDone", ed)?.classList.add("go"); const u = $("#eUns", ed); if (u) u.hidden = false; };
+  const changed = () => { refreshParas(pt, p); if (!S.snap.dirty) { S.snap.dirty = true; pinTab(pt.id); } S.snap.dirty = true; $("#eDone", ed)?.classList.add("go"); const u = $("#eUns", ed); if (u) u.hidden = false; };
   $("#eName", ed).oninput = e => { p.name = e.target.value; changed(); };
   $("#eSym", ed).oninput = e => { p.symptom = e.target.value; const t = todayEntry(pt, p, "hpi"); if (t.text === t.auto && !firstDay) { t.text = t.auto = dHpi(pt, p, S.date); $("#eH", ed).value = t.text; } changed(); };
   $("#eH", ed).oninput = e => { hE.text = e.target.value; changed(); };
@@ -1415,39 +1472,62 @@ async function printModal(list) {
     S.provider = prov; const chosen = list.filter(p => sel.has(p.id)), sigFirst = $("#pSig", m).checked;
     m.close(true);
     chosen.forEach(pt => queueDocx(pt));
-    const info = await printPdf(chosen.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider }))), `${unit} ${md(S.today).replace("/", "-")}.pdf`, { sigFirst });
-    const job = { at: Date.now(), by: S.user?.name || "", ids: chosen.map(p => p.id), order: info.map(x => x.order), checked: [] };
-    const printed = { ...(S.days?.[S.today]?.printed || {}), [unit]: job };
-    try { await saveDay({ printed }); } catch {}
-    setTimeout(() => printCheck(unit), 600);
+    await printPdf(chosen.map(pt => blocksFor(pt, S.today, popts({ provider: S.provider }))), `${unit} ${md(S.today).replace("/", "-")}.pdf`, { sigFirst });
   };
 }
 
-// After printing: every patient in print order with what can't be circled automatically (billing, admit, EKG), plus check-offs.
-function printCheck(unit) {
-  const job = S.days?.[S.today]?.printed?.[unit];
-  if (!job) return toast(`Nothing printed for ${unit} today yet`);
-  const pts = job.ids.map(findPt).filter(Boolean);
-  const checked = new Set(job.checked || []);
-  const missing = unitPts(unit).filter(p => !job.ids.includes(p.id));
-  const m = modal(`${ic("check")} ${esc(unit)} print check`, `<div data-nodirty>
-    <p class="muted" style="margin:0 0 10px">In the order they came off the printer. Circle what the app can't, then check each one off.</p>
-    <table class="pcheck"><tr><th></th><th>#</th><th>Patient</th><th>Billing</th><th>Admit</th><th>EKG</th><th>Pages</th></tr>
-    ${pts.map((p, i) => { const bc = billCode(p), o = job.order?.[i];
-      return `<tr class="${checked.has(p.id) ? "done" : ""}" data-pid="${p.id}"><td><input type="checkbox" ${checked.has(p.id) ? "checked" : ""}></td><td class="muted">${i + 1}</td>
-        <td class="nm">${esc(p.name)}</td><td>${bc ? `<b>${bc}</b>` : `<span class="muted">not set</span>`}</td>
-        <td>${p.status === "admit" || p.admitDate === S.today ? admA({ status: "admit" }) : ""}</td>
-        <td>${ekgToday(p) ? `<span class="ptag ekg">93010</span>` : ""}</td><td class="muted small">${o && o.length > 1 ? o.join(", ") : o ? "1" : ""}</td></tr>`; }).join("")}
-    </table>
-    ${missing.length ? `<div class="al amber" style="margin-top:10px">Not in this print: ${missing.map(p => esc(p.name)).join(", ")}</div>` : ""}
-    <p class="muted small" style="margin-top:8px">Printed ${new Date(job.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${job.by ? " by " + esc(job.by) : ""}.</p></div>`,
-    `<span class="muted small" id="pcN"></span><span class="sp"></span><button class="btn p" data-x>Done</button>`, true);
-  const upd = () => { $("#pcN", m).textContent = `${checked.size} of ${pts.length} checked`; };
-  upd();
-  $$("tr[data-pid] input", m).forEach(c => c.onchange = () => {
-    const id = c.closest("tr").dataset.pid; c.checked ? checked.add(id) : checked.delete(id); c.closest("tr").classList.toggle("done", c.checked); upd();
-    const printed = { ...(S.days?.[S.today]?.printed || {}) }; printed[unit] = { ...job, checked: [...checked] }; saveDay({ printed });
-  });
+// ---------------- billing window ----------------
+// Billing for one unit or all of them, typed here and saved into the Home patient list (same field).
+// EKGs sit right next to billing since they can't be circled automatically; Always 3 shows its reason.
+function a3Reason(p) {
+  const live = p.problems.filter(q => !(q.resolved && q.resolved < S.today)), code = a3(p);
+  if (p.always3) return { code, why: "set by hand" };
+  const names = [...live.map(q => q.name), p.psych?.dx || ""];
+  if (code === "OD") return { code, why: names.find(n => /overdose|\bOD\b/i.test(n)) || "overdose" };
+  if (code === "P") return { code, why: names.find(n => /suicide attempt|schizophrenia/i.test(n)) || "psych" };
+  if (code === "M") return { code, why: loud(flagsFor(p)).find(f => f.level === "red")?.text || "medical issue" };
+  return { code, why: "" };
+}
+const ekgCount = () => S.pts.filter(p => active(p) && ekgToday(p)).length;
+function billingModal(unit) {
+  let show = unit || "all";
+  const yest = E.addDays(S.today, -1);
+  const body = () => {
+    const units = show === "all" ? UNITS : [show];
+    return `<div class="bchips">${["all", ...UNITS].map(u => `<button class="chip ${show === u ? "on" : ""}" data-u="${u}">${u === "all" ? "All units" : u}</button>`).join("")}
+      <span class="sp"></span><span class="muted small">EKGs today: <b id="bE">${ekgCount()}</b></span></div>
+      ${units.map(u => { const l = unitPts(u); if (!l.length) return "";
+        return `<div class="bunit"><div class="bun">${u.toUpperCase()}</div><table class="ovt xl zebra btab"><tr><th></th><th>Patient</th><th title="Billing level today">Today</th><th>EKG</th><th>Always 3?</th><th title="Billing level yesterday">Yest.</th></tr>
+        ${l.map((p, i) => { const r = a3Reason(p), on3 = ["P", "OD"].includes(r.code), e = ekgToday(p);
+          return `<tr data-pt="${p.id}"><td class="muted">${i + 1}</td><td class="nm"><b>${esc(p.name)}</b>${admA(p)}</td>
+            <td><input class="cell bin" value="${esc(p.bill?.[S.today] ?? "")}" placeholder="${tset().today.default3 && on3 ? "3" : ""}" maxlength="1" inputmode="numeric"></td>
+            <td><button class="ekgb ${e ? "on" : ""}" data-ekg title="${e ? "EKG reviewed today (circle 93010)" : "Mark EKG reviewed today"}">${e ? "EKG 93010" : "+ EKG"}</button></td>
+            <td>${r.code !== "~" ? `<span class="a3c ${on3 ? "on" : ""}">${r.code}</span> <span class="muted small">${esc(r.why)}</span>` : `<span class="muted">~</span>`}</td>
+            <td class="muted" style="text-align:center">${esc(effBill(p, yest)) || "—"}</td></tr>`; }).join("")}</table></div>`; }).join("")}`;
+  };
+  const m = modal(`${ic("count")} Billing · ${md(S.today)}`, `<div data-nodirty id="bBody">${body()}</div>`, `<span class="muted small">Saves into the Home list as you type.</span><span class="sp"></span><button class="btn p" data-x>Done</button>`, true);
+  const wire = () => {
+    $$("[data-u]", m).forEach(b => b.onclick = () => { show = b.dataset.u; $("#bBody", m).innerHTML = body(); wire(); });
+    const ins = $$(".bin", m);
+    ins.forEach((inp, k) => {
+      const pt = findPt(inp.closest("tr").dataset.pt);
+      inp.onchange = () => { const v = inp.value.trim(); pt.bill ||= {}; if (v) pt.bill[S.today] = v; else delete pt.bill[S.today]; saveNow(pt, { docx: false, why: `Billing ${v || "cleared"}` }); };
+      inp.oninput = () => { if (/^[123]$/.test(inp.value)) { inp.dispatchEvent(new Event("change")); ins[k + 1]?.focus(); ins[k + 1]?.select(); } };
+      inp.onkeydown = e => { if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); ins[k + 1]?.focus(); } if (e.key === "ArrowUp") { e.preventDefault(); ins[k - 1]?.focus(); } };
+    });
+    $$("[data-ekg]", m).forEach(b => b.onclick = async () => {
+      const pt = findPt(b.closest("tr").dataset.pt); pt.labs ||= [];
+      if (ekgToday(pt)) {
+        const i = pt.labs.findIndex(l => l.date === S.today && /^EKG Reviewed/i.test(l.text));
+        if (i < 0) return toast("This EKG was entered with other labs. Remove it from the note's labs.");
+        pt.labs.splice(i, 1);
+      } else pt.labs.push({ date: S.today, text: `EKG Reviewed ${md(S.today)}.`, bullets: [] });
+      const e = ekgToday(pt); b.classList.toggle("on", e); b.textContent = e ? "EKG 93010" : "+ EKG"; $("#bE", m).textContent = ekgCount();
+      await saveNow(pt, { why: e ? "EKG reviewed" : "EKG removed" });
+    });
+  };
+  wire(); setTimeout(() => $(".bin", m)?.focus(), 80);
+  m.onclose = () => route();
 }
 
 // ---------------- bulk labs ----------------
@@ -1553,7 +1633,7 @@ function bulkAdmits() {
     if (!list.length) return toast("Type at least one name");
     const made = [];
     for (const { name, unit } of list) {
-      const rec = { id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + uid(), status: "admit", needsPrep: true, name, file: name, unit,
+      const rec = { id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + uid(), status: "admit", hpReady: false, name, file: name, unit,
         dob: "", mrn: "", admitDate: S.today, admitTime: "", age: "", sex: "", adolescent: false, psych: { dx: "", taper: "safety" },
         hp: { allergies: "NKA", scribe: S.user?.name || "", meds: [] }, blurb: "", problems: [], vitals: {}, times: {}, refusing: [], labs: [], pendingLabs: [] };
       E.assignTimes([rec], S.today, rec.id + S.today);
@@ -1576,7 +1656,7 @@ function hpForm(id) {
     <div class="grid2"><div class="f"><span>Medication</span><input data-f="mname" list="medList" autocomplete="off" value="${esc(m.name || "")}"></div><div class="f"><span>Dose · route · freq</span><input data-f="mdose" value="${esc([m.dose, m.route, m.freq].filter(Boolean).join(" "))}" placeholder="40mg PO BID"></div></div>
     <div class="row hpSug" style="margin-bottom:6px"></div>
     <div class="row"><label class="chip ${m.home !== false && m.name ? "on" : ""}"><input type="checkbox" data-f="home" ${m.home !== false ? "checked" : ""} hidden>Home med</label><label class="chip"><input type="checkbox" data-f="prn" ${m.prn ? "checked" : ""}> PRN</label><span class="sp"></span><button class="btn sm warn" data-rmp>Remove</button></div></div>`; };
-  $("#main").innerHTML = `<div class="row" style="margin-bottom:10px"><h1>${pt ? "Edit H&amp;P" : "New H&amp;P"}</h1><span class="sp"></span><a class="btn" href="${pt ? "#pt-" + pt.id : "#home"}" style="text-decoration:none">Cancel</a><button class="btn p" id="hSave">Save H&amp;P</button></div>
+  $("#main").innerHTML = `<div class="row" style="margin-bottom:10px"><h1>${pt ? "Edit H&amp;P" : "New H&amp;P"}</h1><span class="sp"></span><a class="btn" href="${pt ? "#pt-" + pt.id : "#home"}" style="text-decoration:none">Cancel</a><button class="btn" id="hSave" title="Save and keep it marked Needs prep">Save · still pending</button><button class="btn p" id="hReady" title="Save and mark it ready for the provider">Save · ready to see</button></div>
     <div class="hpsec card"><div class="hph">${ic("user", 16)} Patient</div>
       <div class="grid3">
         <div class="f span2"><span>Name (Last, First)</span><input id="hN" value="${esc(pt?.name || "")}"></div>
@@ -1615,7 +1695,7 @@ function hpForm(id) {
     nm.oninput = show; show(); $("[data-rmp]", r).onclick = () => r.remove(); $$("label.chip", r).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked))); });
   wireRows();
   $("#hAddP").onclick = () => { $("#hProbs").insertAdjacentHTML("beforeend", probRow()); wireRows(); };
-  $("#hSave").onclick = e => busy(e.currentTarget, async () => {
+  const saveHp = ready => e => busy(e.currentTarget, async () => {
     const name = $("#hN").value.trim(); if (!name) return toast("Add the patient's name");
     const adm = $("#hA").value || S.today, admit = adm.slice(0, 10), age = parseInt($("#hAge").value) || "";
     const rec = pt || { id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + uid(), status: "admit", problems: [], vitals: {}, times: {}, refusing: [], labs: [], pendingLabs: [] };
@@ -1624,7 +1704,7 @@ function hpForm(id) {
       age, sex: $("#hSex").value, adolescent: !!age && age < 18, psych: { dx: $("#hDx").value.trim(), taper: $("#hTap").value } });
     rec.hp = { allergies: $("#hAl").value, scribe: $("#hScr").value, meds: $("#hMeds").value.split("\n").map(s => s.trim()).filter(Boolean),
       surgical: $("#hSurg").value, alcohol: $("#hAlc").value, nicotine: $("#hNic").value, drugs: $("#hDr").value, general: $("#hGen").value };
-    delete rec.needsPrep;
+    delete rec.needsPrep; rec.hpReady = ready;
     rec.blurb = rec.blurb || `Patient is a ${age} year-old ${rec.sex} who admitted to Aspen Grove Behavioral Hospital for inpatient treatment due to ${rec.psych.dx}.`;
     const vv = {}; $$("[data-v]").forEach(i => { if (i.value.trim()) vv[i.dataset.v] = i.value.trim(); }); rec.vitals[admit] = vv;
     rec.labs = $("#hLab").value.trim() ? [{ date: admit, text: $("#hLab").value.trim(), bullets: [] }] : [];
@@ -1639,8 +1719,10 @@ function hpForm(id) {
     if (!rec.times[admit]) E.assignTimes([rec], admit, rec.id + admit);
     if (!pt) S.pts.push(rec);
     if (oldFile && oldFile !== `${rec.file} ADMIT.docx`) { try { await S.store.root.removeEntry(oldFile); } catch {} }
-    S.formDirty = false; await saveNow(rec, { why: pt ? "Edited H&P" : "Created H&P" }); toast(`Saved "${rec.file} ADMIT.docx" in the team folder`); location.hash = "pt-" + rec.id;
+    S.formDirty = false; await saveNow(rec, { why: (pt ? "Edited H&P" : "Created H&P") + (ready ? " (ready)" : " (pending)") });
+    toast(ready ? `${rec.name}: H&P ready to see` : `${rec.name}: saved, still pending`); location.hash = "pt-" + rec.id;
   });
+  $("#hSave").onclick = saveHp(false); $("#hReady").onclick = saveHp(true);
 }
 
 // ---------------- flags (this project's own hub, saved in the team folder) ----------------
@@ -1743,7 +1825,7 @@ const HELP = {
     ["#vit", "Vitals", "Type the unit's vitals in one grid. Refused or UTO fills a whole row."],
     ["#labsU", "Labs", "Review labs for the whole unit at once: pending labs up top, fix a diagnosis's plan, or add a lab-only diagnosis. One save."],
     ["#prn", "Print unit", "Pick who to print, check flags (missing vitals, no labs today), then print as one job. The signed page can come off on top."],
-    ["#pchk", "Print check", "After printing: billing, admits and EKGs to circle, in print order, with check-offs."],
+    ["#bill", "Billing", "Type billing for the unit (it saves into the Home list). EKGs sit right next to it, and Always 3 shows why."],
     [".list", "Patients", "Tap a name to open their note. Red and yellow text means something needs a look."],
   ],
   pt: [
