@@ -243,6 +243,7 @@ export function prep(patient, today, rules) {
   const review = [];
   for (const p of patient.problems) {
     if (p.resolved && p.resolved <= today) continue;   // resolves -> moves to Resolved, no new entries
+    if (p.parked && p.parked <= today) continue;       // sent to PCP / a specialist / psych: stays on the note as is, no daily entries
     if (p.start > tomorrow) continue;
     const reasons = [];
     const tHpi = p.hpi.find(e => e.date === today);
@@ -297,6 +298,8 @@ const para = (p, open, entries, asOf, firstDated) => {
   return `${p.name}: ${head}${bits.join(" ")}`.trim();
 };
 
+// The day a problem resolves, its paragraphs end in "RESOLVED." right where they are; the next day they move to the Resolved boxes.
+const resolvingNote = (p, txt, asOf) => p.resolved === asOf && !/RESOLVED\.?\s*$/.test(txt) ? txt.replace(/\s*$/, "") + " RESOLVED." : txt;
 export function render(patient, asOf) {
   const visible = patient.problems.filter(p => p.start <= asOf);
   const active = visible.filter(p => !(p.resolved && p.resolved < asOf));
@@ -311,13 +314,13 @@ export function render(patient, asOf) {
     : null;
   return {
     blurb: patient.blurb || "",
-    hpi: active.filter(p => !p.planOnly).map(p => para(p, p.hpiOpen, p.hpi, asOf)),
-    resolvedHpi: done.filter(p => !p.planOnly).map(p => para(p, p.hpiOpen, p.hpi, asOf) + " RESOLVED."),
+    hpi: active.filter(p => !p.planOnly).map(p => resolvingNote(p, para(p, p.hpiOpen, p.hpi, asOf), asOf)),
+    resolvedHpi: done.filter(p => !p.planOnly).map(p => resolvingNote({ resolved: asOf }, para(p, p.hpiOpen, p.hpi, asOf), asOf)),
     vitals: patient.vitals?.[asOf] || {},
     labs: (patient.labs || []).filter(l => l.date <= asOf),
     standing: ["Diet is regular.", "Activity is as tolerated."],
-    plan: [psychLine, ...active.filter(p => !p.hpiOnly).map(p => para(p, p.planOpen, p.plan, asOf))].filter(Boolean),
-    resolvedPlan: done.filter(p => !p.hpiOnly).map(p => para(p, p.planOpen, p.plan, asOf) + " RESOLVED."),
+    plan: [psychLine, ...active.filter(p => !p.hpiOnly).map(p => resolvingNote(p, para(p, p.planOpen, p.plan, asOf), asOf))].filter(Boolean),
+    resolvedPlan: done.filter(p => !p.hpiOnly).map(p => resolvingNote({ resolved: asOf }, para(p, p.planOpen, p.plan, asOf), asOf)),
     pcp: patient.problems.filter(p => p.pcp && p.start <= asOf).map(p => p.name),
     pe: active.filter(p => p.peLine).map(p => p.peLine),
     dateOfService: md(asOf) + "/" + asOf.slice(0, 4),

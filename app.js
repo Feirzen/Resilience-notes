@@ -908,7 +908,7 @@ function unitView(u) {
   const isPrepped = p => lastDate(p) > S.today;
   const preppedCount = l.filter(isPrepped).length;
   const has = (q, d) => (q.planOnly ? q.plan : q.hpi).some(e => e.date === d);
-  const behind = l.filter(p => p.status !== "admit" && p.problems.some(q => !(q.resolved && q.resolved < S.today) && q.start < S.today
+  const behind = l.filter(p => p.status !== "admit" && p.problems.some(q => !(q.resolved && q.resolved < S.today) && !q.parked && q.start < S.today
     && (q.planOnly ? q.plan : q.hpi).length && !has(q, S.today)));
   $("#main").innerHTML = `
     <div class="row" style="margin-bottom:12px"><h1>${u}</h1><span class="muted">${l.length} patients</span><span class="sp"></span>
@@ -1289,6 +1289,7 @@ function openEditor(pt, pid) {
         <span class="chip ${p.pcp ? "on" : ""}" data-o="pcp">PCP follow-up</span>
         <span class="chip ${p.peLine ? "on" : ""}" data-o="pe">Affects exam</span>
         <span class="chip ${p.planOnly ? "on" : ""}" data-o="planOnly" title="Found on labs or exam, nothing the patient reports">Plan only</span>
+        <span class="chip ${p.parked ? "on" : ""}" data-o="parked" title="Sent to PCP, a specialist or psych: stays on the note, no daily entries, not resolved">${p.parked ? `Parked since ${md(p.parked)}` : "Outpatient / psych follow-up"}</span>
       </div>
       <div id="ePe" ${p.peLine ? "" : "hidden"} style="margin-top:6px"><div class="grid2"><select id="ePeK">${PE_LINES.map(([k]) => `<option ${p.peLine?.key === k ? "selected" : ""}>${k}</option>`).join("")}</select>
         <input id="ePeT" value="${esc(p.peLine?.text || "")}" placeholder="New exam line"></div></div>
@@ -1352,6 +1353,7 @@ function openEditor(pt, pid) {
     if (o === "pe") { if (p.peLine) delete p.peLine; else p.peLine = { key: "SKIN", text: "" }; }
     if (o === "resolve") p.resolved = p.resolved === S.date ? undefined : S.date;
     if (o === "planOnly") p.planOnly = !p.planOnly || undefined;
+    if (o === "parked") p.parked = p.parked ? undefined : S.date;
     changed(); openEditor(pt, pid);
   });
   $("#ePeK", ed).onchange = e => { p.peLine.key = e.target.value; changed(); };
@@ -1370,6 +1372,11 @@ function openEditor(pt, pid) {
   $("#eMore", ed).ontoggle = e => { S.edMore = e.target.open; };
   $("#eTeach", ed).onclick = () => teachModal(pt, p, hE, pE);
 }
+// Common "manage ___" words, used when the team's rulebook has nothing for a diagnosis yet.
+const SYM = [[/reflux|gerd/i, "acid reflux"], [/hypertension|\bhtn\b|blood pressure/i, "blood pressure"], [/diabet|\bdm\b/i, "blood sugar"], [/migraine/i, "migraines"],
+  [/headache/i, "headaches"], [/asthma/i, "asthma"], [/copd/i, "COPD"], [/allerg/i, "allergies"], [/hypothyroid/i, "hypothyroidism"], [/constipation/i, "constipation"],
+  [/insomnia|sleep/i, "sleep"], [/back pain/i, "back pain"], [/arthritis/i, "arthritis pain"], [/pain/i, "pain"], [/seizure|epilep/i, "seizures"], [/cholesterol|lipid/i, "cholesterol"], [/acne/i, "acne"]];
+const symFor = name => SYM.find(([re]) => re.test(name || ""))?.[1] || "";
 // Add diagnosis: one window. Name, where it goes (patient reports it, or labs/exam only = Plan only), what they report,
 // medications with common doses, and a plan that writes itself from the meds (still editable). Rare settings sit under More options.
 function addProblem(pt) {
@@ -1391,11 +1398,13 @@ function addProblem(pt) {
     <div class="seg2" id="nWhere"><button class="on" data-w="hpi">Patient reports it<small>HPI + Plan</small></button><button data-w="plan">Labs or exam only<small>Plan only</small></button></div>
     <div class="f" id="nHw"><span>What the patient reports</span><textarea id="nH" rows="2" placeholder="Patient presents with… / Patient reports taking … at home for …"></textarea></div>
     <div class="f"><span>Medications</span><div id="nMeds"></div><button class="btn sm" id="nAddM" type="button">${ic("plus", 12)} Add medication</button></div>
+    <div class="row nexam"><label class="mini"><input type="checkbox" id="nPE"> Affects the physical exam?</label><span id="nPEw" hidden style="flex:1;display:flex;gap:6px"><select id="nPEk">${PE_LINES.map(([k]) => `<option>${k}</option>`).join("")}</select><input id="nPEt" placeholder="New exam line, e.g. wound on R calf healing, no erythema." style="flex:1"></span></div>
     <div class="f"><span>Plan <em class="muted" id="nPauto" style="text-transform:none;letter-spacing:0;font-weight:500">· writes itself from the meds</em></span><textarea id="nP" rows="2">Will continue to monitor</textarea></div>
     <details class="nmore"><summary>More options</summary>
       <div class="grid2" style="margin-top:8px"><div class="f"><span>Symptom word (for "reports ___ managed well")</span><input id="nS" placeholder="auto from the name"></div>
         <div class="f"><span>Record a vital every day</span><select id="nV"><option value="">No</option><option value="bp">Blood pressure</option><option value="hr">Heart rate</option><option value="bg">Blood glucose</option></select></div></div>
-      <div class="row"><label class="mini"><input type="checkbox" id="nAF"> Always flag</label><label class="mini"><input type="checkbox" id="nPCP"> PCP follow-up</label></div>
+      <div class="row"><label class="mini"><input type="checkbox" id="nAF"> Always flag</label><label class="mini"><input type="checkbox" id="nPCP"> PCP follow-up</label>
+        <label class="mini" title="Sent to PCP, a specialist or psych: stays on the note, no daily entries"><input type="checkbox" id="nPark"> Outpatient / psych follow-up only</label></div>
     </details>
     ${cur.length ? `<p class="muted small" style="margin-top:10px">Already on this note: ${cur.map(q => esc(q.name)).join(", ")}</p>` : ""}`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="nGo">Save diagnosis</button>`, true);
@@ -1419,6 +1428,7 @@ function addProblem(pt) {
     x.doseText = [o.dose, o.route, o.freq].filter(Boolean).join(" "); x.prn = !!o.prn; drawMeds(); autoPlan(); });
   $("#nAddM", m).onclick = () => { meds.push({ id: uid(), name: "", home: false }); drawMeds(); $$('.nmed [data-k="name"]', m).at(-1)?.focus(); };
   $("#nP", m).oninput = () => { planTouched = true; $("#nPauto", m).hidden = true; };
+  $("#nPE", m).onchange = e => { $("#nPEw", m).hidden = !e.target.checked; if (e.target.checked) $("#nPEt", m).focus(); };
   $("#nS", m).oninput = () => { symTouched = true; };
   $$("[data-w]", m).forEach(b => b.onclick = () => { where = b.dataset.w; $$("[data-w]", m).forEach(x => x.classList.toggle("on", x === b)); $("#nHw", m).hidden = where === "plan"; });
   $("#nN", m).focus();
@@ -1433,7 +1443,8 @@ function addProblem(pt) {
     const p = { id: uid(), name, symptom: (symTouched && $("#nS", m).value.trim()) || name.toLowerCase(), autoVital: $("#nV", m).value || undefined, start: S.date, hpiOpen: null,
       planOpen: $("#nP", m).value.trim() || "Will continue to monitor", meds: ms,
       hpi: where === "plan" ? [] : [{ date: S.date, text: $("#nH", m).value.trim(), auto: "" }], plan: [],
-      ...(where === "plan" ? { planOnly: true } : {}), ...($("#nAF", m).checked ? { alwaysFlag: true } : {}), ...($("#nPCP", m).checked ? { pcp: true } : {}) };
+      ...(where === "plan" ? { planOnly: true } : {}), ...($("#nAF", m).checked ? { alwaysFlag: true } : {}), ...($("#nPCP", m).checked ? { pcp: true } : {}),
+      ...($("#nPark", m).checked ? { parked: S.date } : {}), ...($("#nPE", m).checked && $("#nPEt", m).value.trim() ? { peLine: { key: $("#nPEk", m).value, text: $("#nPEt", m).value.trim() } } : {}) };
     pt.problems.push(p); m.close(true); await saveNow(pt, { why: `Added ${name}` }); toast(`${name} added`); route();
   };
 }
@@ -1879,7 +1890,17 @@ function hpForm(id) {
     const nm = $('[data-f="mname"]', r), sg = $(".hpSug", r);
     const show = () => { const o = findMed(nm.value); sg.innerHTML = o ? `<span class="muted">Common:</span>` + o.map((x, i) => `<span class="chip sug" data-i="${i}">${esc([x.dose, x.route, x.freq, x.prn ? "PRN" : ""].filter(Boolean).join(" "))}</span>`).join("") : "";
       $$(".sug", sg).forEach(c => c.onclick = () => { const x = o[+c.dataset.i]; $('[data-f="mdose"]', r).value = [x.dose, x.route, x.freq].join(" "); $('[data-f="prn"]', r).checked = x.prn; S.formDirty = true; }); };
-    nm.oninput = show; show(); $("[data-rmp]", r).onclick = () => r.remove(); $$("label.chip", r).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked))); });
+    // Suggested HPI line: "Patient reports taking … at home to manage <symptom>." The … fills in from the med as you type it.
+    const dxI = $('[data-f="name"]', r), hpiI = $('[data-f="hpi"]', r), symI = $('[data-f="symptom"]', r), doseI = $('[data-f="mdose"]', r);
+    const symWord = () => symI.value.trim() || rulebook()[dxI.value.trim()]?.symptom || symFor(dxI.value) || dxI.value.trim().toLowerCase();
+    const medText = () => [nm.value.trim(), doseI.value.trim()].filter(Boolean).join(" ");
+    const template = () => `Patient reports taking ${medText() || "…"} at home to manage ${symWord()}.`;
+    let auto = !hpiI.value.trim();
+    const fill = () => { if (auto && dxI.value.trim()) hpiI.value = template(); };
+    dxI.addEventListener("change", fill); dxI.addEventListener("input", () => { if (!hpiI.value.trim()) auto = true; fill(); });
+    symI.addEventListener("input", fill); doseI.addEventListener("input", fill);
+    hpiI.addEventListener("input", () => { auto = false; });
+    nm.oninput = () => { show(); fill(); }; show(); $("[data-rmp]", r).onclick = () => r.remove(); $$("label.chip", r).forEach(l => l.onclick = () => setTimeout(() => l.classList.toggle("on", $("input", l).checked))); });
   wireRows();
   $("#hAddP").onclick = () => { $("#hProbs").insertAdjacentHTML("beforeend", probRow()); wireRows(); };
   const saveHp = ready => e => busy(e.currentTarget, async () => {

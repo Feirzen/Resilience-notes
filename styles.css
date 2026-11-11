@@ -738,3 +738,5 @@ body.presenting .pzgo{display:none}
 @keyframes hsparkle{50%{opacity:.15}}
 .tray .hpv{width:100%;border:1px solid var(--paperLine);border-radius:8px;padding:6px 8px;background:var(--paper);font-size:13px}
 @media (prefers-reduced-motion:reduce){.hmark,[data-holiday] .top::after{animation:none}}
+.nexam{margin:-2px 0 10px;align-items:center}
+.nexam select,.nexam input{border:1px solid var(--paperLine);background:var(--paper);border-radius:8px;padding:6px 8px;font-size:13px}

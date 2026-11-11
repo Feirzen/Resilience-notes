@@ -215,4 +215,21 @@ t("Refused / UTO vitals read as words in the HPI", () => {
   assert.equal(htn.hpi.at(-1).text, "Patient taking Lisinopril, refused vitals today.");
 });
 
+t("resolving day: paragraph says RESOLVED in place; next day it's in the Resolved box once", () => {
+  const p = fake(), g = p.problems[1];
+  E.prep(p, "2026-10-30"); g.resolved = "2026-10-31";
+  const r = E.render(p, "2026-10-31");
+  assert.match(r.hpi.find(x => x.startsWith("Gastro")), /RESOLVED\.$/);
+  assert.match(r.plan.find(x => x.startsWith("Gastro")), /RESOLVED\.$/);
+  const n = E.render(p, "2026-11-01");
+  assert.ok(!n.hpi.some(x => x.startsWith("Gastro")));
+  assert.equal((n.resolvedHpi[0].match(/RESOLVED/g) || []).length, 1);
+});
+t("parked problem (sent to PCP / psych) stays on the note but gets no new entries", () => {
+  const p = fake(), g = p.problems[1]; g.parked = "2026-10-30";
+  E.prep(p, "2026-10-30");
+  assert.ok(!g.hpi.some(e => e.date === "2026-10-31"));
+  assert.ok(E.render(p, "2026-10-31").hpi.some(x => x.startsWith("Gastro")));
+});
+
 console.log(`\n${pass} passed`);
