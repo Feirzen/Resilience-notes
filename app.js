@@ -5,6 +5,7 @@ import { toDocx } from "./lib/docx-out.js";
 import { readDocx } from "./lib/docx-in.js";
 import { toPdf } from "./lib/pdf-out.js";
 import { boardPdf, STATUS as BSTAT } from "./lib/board-pdf.js";
+import { mergePatient, applyTheirs } from "./lib/merge.js";
 import { Store, supported } from "./lib/store.js";
 import { demoPatients } from "./lib/demo.js";
 import { MED_NAMES, findMed } from "./lib/meds.js";
@@ -139,6 +140,7 @@ function flagsFor(pt, date = S.today) {
     ? { level: "red", problemId: x.problemId, text: `${x.name} pending since ${md(x.since)}: was it ordered?` }
     : { level: "amber", problemId: x.problemId, text: `${x.name} pending` });
   extra.push(...vitalFlags(pt, date));
+  if (pt.clashes?.length) extra.push({ level: "amber", text: `Two versions to pick between (${pt.clashes.length})` });
   const live = pt.problems.filter(q => q.start <= date && !(q.resolved && q.resolved < date));
   const all = [...E.flags(pt, date, rulebook()).filter(f => !/pending$/i.test(f.text)), ...extra, ...labs].filter(f => !done.includes(f.text));
   // Med flags ("Augmentin last dose today") sometimes come without a diagnosis; tie them to the diagnosis that has that med.
@@ -157,6 +159,8 @@ const editedToday = (pt, p) => [...p.hpi, ...p.plan].some(e => e.date >= S.today
 // A banner shows "Saving… 2 of 5" so you can keep working but won't close the tab mid-save.
 // If something takes too long or fails, the banner turns red with Keep trying / Retry / Undo.
 const timers = {}, queue = {}, conflicts = new Set();
+const BASE = new Map();                       // the version of each note this computer last loaded or saved (for merging)
+const setBase = pt => BASE.set(pt.id, structuredClone(pt));
 const enqueue = (pt, job) => (queue[pt.id] = (queue[pt.id] || Promise.resolve()).then(job).catch(e => { console.error(e); }));
 const SV = { total: 0, done: 0, pending: new Set(), failed: new Map(), good: new Map(), slow: false };
 const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} took too long`)), ms))]);
@@ -181,7 +185,7 @@ function saveNow(pt, { docx = true, why = "Edited note" } = {}) {
   return job.promise = enqueue(pt, async () => {
     waiting.delete(pt.id); docx = job.docx;
     pt.updated = Date.now();
-    try { const r = await withTimeout(S.store.savePatient(pt), SV.slow ? 60000 : 15000, "Saving the note"); if (r === "conflict") { SV.pending.delete(pt.id); saveBanner(); return conflict(pt); } }
+    try { const r = await withTimeout(S.store.savePatient(pt), SV.slow ? 60000 : 15000, "Saving the note"); if (r === "conflict") { SV.pending.delete(pt.id); saveBanner(); return conflict(pt, docx); } setBase(pt); }
     catch (e) { return fail(pt, e, "data"); }
     if (docx) queueDocx(pt, true); else finish(pt);
   });
@@ -195,14 +199,52 @@ function logEdit(pt, what) {
 }
 // Run jobs a few at a time (network drives are faster in parallel, but not unlimited).
 async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } })); }
-function conflict(pt) {
+// Another computer saved this note after we loaded it. Merge both sets of edits; only real clashes
+// (the same entry changed two different ways) need a person, and those can wait ("decide later" flags the note).
+async function conflict(pt, docx = true) {
   if (conflicts.has(pt.id)) return; conflicts.add(pt.id);
-  const m = modal("Changed on another computer", `<p class="muted" style="font-size:14px">${esc(pt.name)}'s note was saved from another computer after you opened it. Load their version, or keep yours (this overwrites theirs)?</p>`,
-    `<button class="btn" data-load>Load theirs</button><button class="btn p" data-keep>Keep mine</button>`);
-  m.onclose = () => conflicts.delete(pt.id);
-  $("[data-load]", m).onclick = e => busy(e.currentTarget, async () => { const fresh = await S.store.reloadPatient(pt.id); for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, fresh); m.close(true); route(); toast("Loaded the latest version"); });
-  $("[data-keep]", m).onclick = e => busy(e.currentTarget, async () => { m.close(true); track(pt.id); await S.store.savePatient(pt, true); queueDocx(pt, true); });
+  try {
+    const theirs = await S.store.reloadPatient(pt.id);
+    if (!theirs) { await S.store.savePatient(pt, true); setBase(pt); return; }
+    const who = theirs.log?.at(-1)?.by || "someone else";
+    const { merged, clashes } = mergePatient(BASE.get(pt.id), pt, theirs);
+    for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, merged, { rev: theirs.rev });
+    if (clashes.length) pt.clashes = [...(pt.clashes || []), ...clashes.map(c => ({ ...c, by: who, at: Date.now() }))];
+    track(pt.id); await S.store.savePatient(pt); setBase(theirs);
+    if (docx) queueDocx(pt, true); else finish(pt);
+    toast(clashes.length ? `${pt.name}: ${who} saved at the same time. ${clashes.length} spot${clashes.length > 1 ? "s" : ""} to pick.` : `${pt.name}: merged with ${who}'s save`, 3200);
+    if (S.snap?.id === pt.id) S.snap = { id: pt.id, data: structuredClone(pt), dirty: false };
+    if (clashes.length) reconcileModal(pt); else if (location.hash === "#pt-" + pt.id && !S.open) route();
+  } catch (e) { fail(pt, e, "data"); }
+  finally { conflicts.delete(pt.id); }
 }
+function reconcileModal(pt) {
+  const cs = pt.clashes || []; if (!cs.length) return;
+  const show = v => typeof v === "string" ? esc(v) : v == null ? `<span class="muted">(removed)</span>` : esc(v.text ?? v.name ?? JSON.stringify(v));
+  const m = modal(`Two versions of ${esc(pt.name)}`, `<div data-nodirty><p class="muted" style="margin-bottom:10px">This note was saved on two computers at the same time and these spots were changed both ways. Everything else was combined. Pick which wording stays.</p>
+    ${cs.map((c, i) => `<div class="rc"><div class="rcl">${esc(c.label)}</div><div class="rcg">
+      <label class="rco"><input type="radio" name="rc${i}" value="mine" checked><span><b>This computer</b>${show(c.mine)}</span></label>
+      <label class="rco"><input type="radio" name="rc${i}" value="theirs"><span><b>${esc(c.by || "Other computer")}</b>${show(c.theirs)}</span></label></div></div>`).join("")}</div>`,
+    `<button class="btn" id="rcLater" title="Keeps this computer's version for now and flags the note">Decide later</button><span class="sp"></span><button class="btn p" id="rcGo">Use these</button>`, true);
+  $("#rcLater", m).onclick = () => { m.close(true); route(); };
+  $("#rcGo", m).onclick = e => busy(e.currentTarget, async () => {
+    cs.forEach((c, i) => { if ($(`input[name="rc${i}"]:checked`, m)?.value === "theirs") applyTheirs(pt, c); });
+    delete pt.clashes; m.close(true); await saveNow(pt, { why: "Picked between two versions" }); toast("Done"); route();
+  });
+}
+// While a note is open, check every 15 seconds whether another computer saved it. If you're not mid-edit,
+// it quietly refreshes; if you are, your next save merges both.
+setInterval(async () => {
+  if (document.visibilityState !== "visible" || !S.store || !location.hash.startsWith("#pt-")) return;
+  const id = location.hash.slice(4), pt = findPt(id); if (!pt || conflicts.has(id)) return;
+  if ((S.snap?.id === id && S.snap.dirty) || SV.pending.has(id) || waiting.has(id) || S.open || $(".scrim")) return;
+  try {
+    const rev = await S.store.peekRev(id); if (rev <= (S.store.revs[id] || 0)) return;
+    const fresh = await S.store.reloadPatient(id); if (!fresh) return;
+    for (const k of Object.keys(pt)) delete pt[k]; Object.assign(pt, fresh); setBase(pt);
+    if (location.hash === "#pt-" + id && !S.open) { route(); toast(`Updated: ${fresh.log?.at(-1)?.by || "someone"} saved a newer version`, 2400); }
+  } catch {}
+}, 15000);
 const lastDate = pt => pt.problems.flatMap(p => [...p.hpi, ...p.plan]).reduce((a, e) => e.date > a ? e.date : a, S.today);
 const noteDate = pt => S.viewDate || (pt.status === "admit" ? S.today : lastDate(pt));
 async function docxTarget(pt) {
@@ -468,7 +510,7 @@ function welcome() {
 }
 
 async function load() {
-  S.pts = await S.store.loadPatients();
+  S.pts = await S.store.loadPatients(); S.pts.forEach(setBase);
   S.pts.forEach(p => p.file ||= p.name);
   for (const pt of S.pts) {                       // clean up notes imported by older versions
     const before = pt.problems.length;
@@ -498,7 +540,7 @@ async function load() {
 }
 window.addEventListener("focus", async () => {        // pick up other computers' changes
   if (!S.store || S.open || $(".scrim") || presenting()) return;
-  try { S.pts = await S.store.loadPatients(); S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []); S.ann = await S.store.getShared("announce.json", []); S.table = await S.store.getShared("table.json", {}); route(); } catch {}
+  try { S.pts = await S.store.loadPatients(); S.pts.forEach(setBase); S.days = await S.store.getShared("days.json", {}); S.board = await S.store.getShared("board.json", []); S.ann = await S.store.getShared("announce.json", []); S.table = await S.store.getShared("table.json", {}); route(); } catch {}
 });
 
 // Small shared badges: circled A for a new admit, teal count for notes to write up.
@@ -975,6 +1017,7 @@ function ptView(id) {
     <div style="min-width:0">
       ${ro ? `<div class="al amber" style="margin-bottom:10px">Old version: how this note read on ${md(S.viewDate)}. Read only.<span class="sp"></span><button class="btn sm" id="reprint">${ic("print", 13)} Print this version</button><button class="btn sm" id="backNow">Back to current</button></div>`
         : lastDate(pt) > S.today ? `<div class="al" style="background:var(--hover);border-color:var(--accent);margin-bottom:10px">Prepped for ${md(lastDate(pt))}.<span class="sp"></span><button class="btn sm" id="unprepP">Unprep</button></div>` : ""}
+      ${!ro && pt.clashes?.length ? `<div class="al amber" style="margin-bottom:10px">Saved on two computers at once: ${pt.clashes.length} spot${pt.clashes.length > 1 ? "s" : ""} to pick between.<span class="sp"></span><button class="btn sm" id="rcOpen">Pick versions</button></div>` : ""}
       ${!ro && pt.status === "admit" ? `<div class="al ${hpReady(pt) ? "" : "amber"} hpst" style="margin-bottom:10px;${hpReady(pt) ? "background:var(--hover);border-color:var(--accent)" : ""}">${hpReady(pt) ? `<b class="prepok" style="margin:0">Ready</b> H&amp;P is ready for the provider.` : `<b class="needprep" style="margin:0">Needs prep</b> H&amp;P still pending.`}<span class="sp"></span><a class="btn sm" href="#hp-${pt.id}" style="text-decoration:none">${ic("hp", 13)} Edit H&amp;P form</a><button class="btn sm" id="hpTog">${hpReady(pt) ? "Mark pending" : "Mark ready to see"}</button></div>` : ""}
       ${ro ? "" : `<div class="tools" data-help="tools">
         <button class="btn go big" id="addP">${ic("plus")} Add diagnosis</button>
@@ -1046,6 +1089,7 @@ function ptView(id) {
   $("#stk")?.addEventListener("click", () => stickyModal([pt]));
   $("#labs")?.addEventListener("click", () => labsModal(pt));
   $("#reprint")?.addEventListener("click", () => reprintModal(pt));
+  $("#rcOpen")?.addEventListener("click", () => reconcileModal(pt));
   $("#hpTog")?.addEventListener("click", async () => { pt.hpReady = !hpReady(pt); delete pt.needsPrep; await saveNow(pt, { docx: false, why: pt.hpReady ? "H&P marked ready" : "H&P marked pending" }); route(); });
   $("#moreB")?.addEventListener("click", e => { e.stopPropagation(); const m = $("#moreM"); m.hidden = !m.hidden; if (!m.hidden) setTimeout(() => document.addEventListener("click", () => { m.hidden = true; }, { once: true })); });
   $$("[data-m]").forEach(b => b.onclick = () => { const k = b.dataset.m;
