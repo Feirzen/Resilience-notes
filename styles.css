@@ -711,3 +711,30 @@ body.presenting .pzgo{display:none}
 .rco b{display:block;font:700 11px var(--sans);text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:2px}
 .rco input{accent-color:var(--accent);margin-top:3px}
 .rco:has(input:checked){border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--paper))}
+/* ---------- holidays ---------- */
+.hmark{display:inline-grid;place-items:center;margin-left:6px;color:var(--accent);animation:hbob 3.2s ease-in-out infinite}
+@keyframes hbob{50%{transform:translateY(-2px) rotate(-4deg)}}
+.hm-christmas{color:#4fd18b}.hm-halloween{color:#ff8a1f}.hm-thanks{color:#e3a04a}.hm-july4{color:#ff5a5a}.hm-newyear{color:#f5cf5a}
+.hm-valentine,.hm-mother{color:#ff6b8f}.hm-stpat{color:#3ccf6e}.hm-easter{color:#c39bff}.hm-pioneer{color:#d9a86c}
+.hm-veterans,.hm-mlk,.hm-presidents,.hm-memorial,.hm-juneteenth,.hm-labor,.hm-columbus{color:#9cbcf2}
+[data-holiday=christmas]{--chrome:#123524!important;--chrome2:#174430!important;--chromeLine:#22573d!important;--accent:#d8443c!important;--accentInk:#fff!important}
+[data-holiday=halloween]{--chrome:#22142f!important;--chrome2:#2d1a3e!important;--chromeLine:#3f2756!important;--accent:#ff7a1a!important;--accentInk:#1a0d24!important}
+[data-holiday=thanks]{--chrome:#3a2414!important;--chrome2:#4a2e19!important;--chromeLine:#5e3c22!important;--accent:#e08a2e!important;--accentInk:#2a1608!important}
+[data-holiday=july4]{--chrome:#13224d!important;--chrome2:#1a2d61!important;--chromeLine:#263d7a!important;--accent:#e23b45!important;--accentInk:#fff!important}
+[data-holiday=newyear]{--chrome:#111018!important;--chrome2:#1b1a26!important;--chromeLine:#2c2a3a!important;--accent:#e9bf4a!important;--accentInk:#1a1406!important}
+/* a little weather in the top bar only: snow, embers, leaves, sparks */
+[data-holiday] .top{position:sticky;overflow:hidden}
+[data-holiday=christmas] .top::after,[data-holiday=halloween] .top::after,[data-holiday=thanks] .top::after,[data-holiday=july4] .top::after,[data-holiday=newyear] .top::after{
+  content:"";position:absolute;inset:-60px 0 0;pointer-events:none;opacity:.55;animation:hfall 9s linear infinite;
+  background-image:radial-gradient(2px 2px at 8% 20%,#fff,transparent),radial-gradient(1.5px 1.5px at 23% 60%,#fff,transparent),radial-gradient(2px 2px at 41% 35%,#fff,transparent),
+    radial-gradient(1.5px 1.5px at 57% 75%,#fff,transparent),radial-gradient(2px 2px at 72% 15%,#fff,transparent),radial-gradient(1.5px 1.5px at 88% 55%,#fff,transparent),radial-gradient(1.5px 1.5px at 95% 85%,#fff,transparent);
+  background-size:100% 60px}
+[data-holiday=halloween] .top::after{filter:sepia(1) saturate(6) hue-rotate(-20deg);opacity:.4}
+[data-holiday=thanks] .top::after{filter:sepia(1) saturate(4);opacity:.35}
+[data-holiday=july4] .top::after,[data-holiday=newyear] .top::after{animation:hsparkle 2.8s ease-in-out infinite;inset:0}
+[data-holiday=july4] .top::after{filter:sepia(1) saturate(8) hue-rotate(-40deg)}
+[data-holiday=newyear] .top::after{filter:sepia(1) saturate(3)}
+@keyframes hfall{to{transform:translateY(60px)}}
+@keyframes hsparkle{50%{opacity:.15}}
+.tray .hpv{width:100%;border:1px solid var(--paperLine);border-radius:8px;padding:6px 8px;background:var(--paper);font-size:13px}
+@media (prefers-reduced-motion:reduce){.hmark,[data-holiday] .top::after{animation:none}}

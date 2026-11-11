@@ -6,6 +6,7 @@ import { readDocx } from "./lib/docx-in.js";
 import { toPdf } from "./lib/pdf-out.js";
 import { boardPdf, STATUS as BSTAT } from "./lib/board-pdf.js";
 import { mergePatient, applyTheirs } from "./lib/merge.js";
+import { holidayFor, markFor, byKey as hByKey, PREVIEW as HPREVIEW } from "./lib/holidays.js";
 import { Store, supported } from "./lib/store.js";
 import { demoPatients } from "./lib/demo.js";
 import { MED_NAMES, findMed } from "./lib/meds.js";
@@ -313,6 +314,9 @@ async function writeDocx(pt) {
 
 // ---------------- theme (Look) ----------------
 const LOOKS = { light: ["Light", "#efebe3", "#0f1726"], dark: ["Dark", "#0b111d", "#22c9a0"], sepia: ["Sepia", "#e9dfcb", "#3b2f1e"], chameleon: ["Chameleon", "", ""] };
+// Holidays: a small mark by the logo; the big ones (Christmas, Halloween, Thanksgiving, July 4th, New Year) also recolor the app.
+const holidayNow = () => { if (ls.get("rn-holiday") === "off") return null; const pv = S.store?.demo && ls.get("rn-hpreview"); return pv ? hByKey(pv) : holidayFor(S.today); };
+function applyHoliday() { const h = holidayNow(); document.documentElement.dataset.holiday = h?.big ? h.key : ""; }
 function applyTheme(t = ls.get("rn-theme") || "light") {
   const r = document.documentElement; r.dataset.theme = t === "chameleon" ? "light" : t;
   ["--chrome", "--chrome2", "--chromeLine", "--accent"].forEach(v => r.style.removeProperty(v));
@@ -333,7 +337,7 @@ function shell() {
     <div class="bar">
       ${S.store && hash && hash !== "home" ? `<button class="back" id="back" aria-label="Back">‹</button>` : ""}
       <img class="logo" src="icons/favicon.svg" alt="">
-      <span class="brand">NOTEMAKER</span>${S.site && S.user ? `<span class="sitetag">${S.site}</span>` : ""}
+      <span class="brand">NOTEMAKER</span>${(() => { const h = holidayNow(); return h ? `<span class="hmark hm-${h.key}" title="${esc(h.name)}">${markFor(h)}</span>` : ""; })()}${S.site && S.user ? `<span class="sitetag">${S.site}</span>` : ""}
       ${S.store?.demo ? `<span class="pill a" style="font-size:10px">DEMO</span>` : ""}
       <span class="sp"></span>
       <div class="today"><b>${new Date(S.today + "T12:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</b>
@@ -345,7 +349,7 @@ function shell() {
       const red = counts[u].some(p => flagsFor(p).some(f => f.level === "red"));
       return `<a href="#unit-${u}" class="${curUnit === u ? "on" : ""}">${u.toUpperCase()}<i>${counts[u].length}</i>${red ? `<span class="rd"></span>` : ""}</a>`;
     }).join("")}<a href="#board" class="bbtab ${hash === "board" ? "on" : ""}">${ic("grid", 13)} BEDBOARD</a></nav>${tabStrip(hash)}` : ""}`;
-  wireTabs(); setTopH();
+  wireTabs(); setTopH(); applyHoliday();
   if ($("#oldNotes")) $("#oldNotes").onclick = () => S.viewDate ? (S.viewDate = null, route()) : oldNotesModal();
   $("#gear").onclick = toggleTray;
   $("#helpB")?.addEventListener("click", helpMenu);
@@ -402,6 +406,8 @@ function toggleTray() {
   t.innerHTML = `<h4>Look</h4><div class="looks">${Object.entries(LOOKS).map(([k, [n, bg, fg]]) =>
     `<button data-look="${k}" class="${cur === k ? "on" : ""}"><span class="sw" style="background:${k === "chameleon" ? "conic-gradient(#e5484d,#f0a020,#22c9a0,#4f7cff,#a855f7,#e5484d)" : `linear-gradient(135deg,${bg} 55%,${fg} 55%)`}"></span>${n}</button>`).join("")}</div>
     ${cur === "chameleon" ? `<button class="item" data-reroll>${ic("palette")} New colors</button>` : ""}
+    <label class="tgl item" style="padding:6px 8px"><input type="checkbox" data-hol ${ls.get("rn-holiday") === "off" ? "" : "checked"}><span class="sw"></span><span>Holiday decorations<small>${(() => { const h = holidayFor(S.today); return h ? esc(h.name) + " today" : "Shows up on holidays"; })()}</small></span></label>
+    ${S.store?.demo ? `<select class="item hpv" data-hpv><option value="">Preview a holiday…</option>${Object.entries(HPREVIEW).map(([k, n]) => `<option value="${k}" ${ls.get("rn-hpreview") === k ? "selected" : ""}>${n}</option>`).join("")}</select>` : ""}
     <button class="item" data-present>${ic("monitor")} Presentation mode</button>
     ${S.store && S.user ? `<h4>Work</h4><button class="item" data-train>${ic("book")} Trainings</button><button class="item" data-vlim>${ic("vitals")} Vital alerts</button>
       <button class="item" data-rules>${ic("shield")} ${isSup() ? "Supervisor tools" : "Team rules"}</button>` : ""}
@@ -414,6 +420,8 @@ function toggleTray() {
   $$("[data-look]", t).forEach(b => b.onclick = () => { ls.set("rn-theme", b.dataset.look); applyTheme(b.dataset.look); close(); toggleTray(); });
   $("[data-reroll]", t)?.addEventListener("click", () => { ls.set("rn-hue", String(Math.floor(Math.random() * 360))); applyTheme("chameleon"); });
   $("[data-present]", t)?.addEventListener("click", () => { close(); startPresentation(); });
+  $("[data-hol]", t)?.addEventListener("change", e => { ls.set("rn-holiday", e.target.checked ? "on" : "off"); shell(); });
+  $("[data-hpv]", t)?.addEventListener("change", e => { ls.set("rn-hpreview", e.target.value); shell(); });
   $("[data-flag]", t)?.addEventListener("click", () => { close(); raiseFlag(); });
   $("[data-hub]", t)?.addEventListener("click", () => { close(); location.hash = "flags"; });
   $("[data-train]", t)?.addEventListener("click", () => { close(); location.hash = "training"; });
