@@ -86,7 +86,7 @@ const LABS = ["CBC with diff", "CBC", "CMP", "BMP", "TSH", "free T4", "T4", "T3"
 const LAB_RE = new RegExp("\\b(" + LABS.map(x => x.replace(/[-/]/g, "\\$&")).join("|") + ")\\b", "gi");
 const WAIT_RE = /\b(order(?:ed|ing)?|re-?order(?:ed)?|pending|re-?check(?:ed|ing)?|check(?:ed|ing)?|will obtain|obtain(?:ed)?|drawn|sent)\b/i;
 function pendingLabs(pt, date = S.today) {
-  const since = E.addDays(date, -7), out = new Map();
+  const since = E.addDays(date, -30), out = new Map();
   const results = (pt.labs || []).map(l => ({ d: l.date, t: (l.text + " " + (l.bullets || []).join(" ")).toLowerCase() }));
   for (const q of pt.problems) {
     if (q.resolved && q.resolved < date) continue;
@@ -99,11 +99,45 @@ function pendingLabs(pt, date = S.today) {
   for (const n of pt.pendingLabs || []) if (!out.has(n.toUpperCase())) out.set(n.toUpperCase(), { name: n, since: "0000" });
   return [...out.values()].filter(x => !results.some(r => r.d >= x.since && r.t.includes(x.name.toLowerCase())));
 }
+// Abnormal vitals: each person sets their own limits (gear > Vital alerts). Blank = no alert for that one.
+const VLIM = [["sbpHi", "Systolic BP above", 160], ["sbpLo", "Systolic BP below", 90], ["dbpHi", "Diastolic BP above", 100], ["hrHi", "Pulse above", 110], ["hrLo", "Pulse below", 50],
+  ["tempHi", "Temp at or above", 100.4], ["o2Lo", "O2 sat below", 92], ["bgHi", "BG above", 250], ["bgLo", "BG below", 70]];
+const myLimits = () => ({ ...Object.fromEntries(VLIM.map(([k, , d]) => [k, d])), ...(S.settings?.vitalLimits?.[S.user?.id || "me"] || {}) });
+function vitalFlags(pt, date) {
+  const v = pt.vitals?.[date]; if (!v) return [];
+  const L = myLimits(), out = [], num = x => { const n = parseFloat(String(x ?? "").replace(/[^\d.]/g, "")); return isNaN(n) ? null : n; };
+  const has = k => L[k] !== "" && L[k] != null;
+  const tie = key => pt.problems.find(q => q.autoVital === key && !(q.resolved && q.resolved < date))?.id;
+  const [sbp, dbp] = String(v.bp || "").split("/").map(num);
+  if (sbp != null && ((has("sbpHi") && sbp > L.sbpHi) || (has("sbpLo") && sbp < L.sbpLo) || (has("dbpHi") && dbp > L.dbpHi)))
+    out.push({ level: "amber", problemId: tie("bp"), text: `BP ${v.bp} (${sbp < L.sbpLo ? "low" : "high"})` });
+  const hr = num(v.hr); if (hr != null && ((has("hrHi") && hr > L.hrHi) || (has("hrLo") && hr < L.hrLo))) out.push({ level: "amber", text: `Pulse ${v.hr} (${hr < L.hrLo ? "low" : "high"})` });
+  const t = num(v.temp); if (t != null && has("tempHi") && t >= L.tempHi) out.push({ level: "amber", text: `Temp ${v.temp}` });
+  const o2 = num(v.o2); if (o2 != null && has("o2Lo") && o2 < L.o2Lo) out.push({ level: "amber", text: `O2 sat ${v.o2}%` });
+  const bg = num(v.bg); if (bg != null && ((has("bgHi") && bg > L.bgHi) || (has("bgLo") && bg < L.bgLo))) out.push({ level: "amber", problemId: tie("bg"), text: `BG ${v.bg} (${bg < L.bgLo ? "low" : "high"})` });
+  return out;
+}
+function vitalLimitsModal() {
+  const L = myLimits();
+  const m = modal(`${ic("vitals")} Vital alerts`, `<p class="muted" style="margin-bottom:10px">Your own limits. A vital outside them shows as a flag on the note and before printing. Leave a box empty to turn that alert off.</p>
+    <div class="vlim">${VLIM.map(([k, n, d]) => `<label class="f"><span>${n}</span><input data-k="${k}" value="${esc(L[k] ?? "")}" placeholder="off" inputmode="decimal"><small class="muted">default ${d}</small></label>`).join("")}</div>`,
+    `<button class="btn" id="vlReset">Back to defaults</button><span class="sp"></span><button class="btn" data-x>Cancel</button><button class="btn p" id="vlGo">Save</button>`);
+  $("#vlReset", m).onclick = () => $$("[data-k]", m).forEach(i => i.value = VLIM.find(x => x[0] === i.dataset.k)[2]);
+  $("#vlGo", m).onclick = e => busy(e.currentTarget, async () => {
+    const mine = {}; $$("[data-k]", m).forEach(i => { const t = i.value.trim(); mine[i.dataset.k] = t === "" ? "" : parseFloat(t); });
+    if (S.store) { const fresh = await S.store.getShared("settings.json", S.settings); fresh.vitalLimits = { ...(fresh.vitalLimits || {}), [S.user?.id || "me"]: mine }; S.settings = { ...S.settings, vitalLimits: fresh.vitalLimits }; await S.store.setShared("settings.json", { ...fresh }); }
+    m.close(true); toast("Vital alerts saved"); route();
+  });
+}
 function flagsFor(pt, date = S.today) {
   const done = pt.addressed?.[date] || [];
   const extra = pt.problems.filter(q => q.start <= date && !(q.resolved && q.resolved < date) && isDiabetes(q.name) && onInsulin(q) === undefined)
     .map(q => ({ level: "amber", problemId: q.id, text: `Taking insulin? (${q.name})` }));
-  const labs = pendingLabs(pt, date).map(x => ({ level: "amber", problemId: x.problemId, text: `${x.name} pending` }));
+  const week = E.addDays(date, -7);
+  const labs = pendingLabs(pt, date).map(x => x.since !== "0000" && x.since <= week
+    ? { level: "red", problemId: x.problemId, text: `${x.name} pending since ${md(x.since)}: was it ordered?` }
+    : { level: "amber", problemId: x.problemId, text: `${x.name} pending` });
+  extra.push(...vitalFlags(pt, date));
   const live = pt.problems.filter(q => q.start <= date && !(q.resolved && q.resolved < date));
   const all = [...E.flags(pt, date, rulebook()).filter(f => !/pending$/i.test(f.text)), ...extra, ...labs].filter(f => !done.includes(f.text));
   // Med flags ("Augmentin last dose today") sometimes come without a diagnosis; tie them to the diagnosis that has that med.
@@ -326,7 +360,7 @@ function toggleTray() {
     `<button data-look="${k}" class="${cur === k ? "on" : ""}"><span class="sw" style="background:${k === "chameleon" ? "conic-gradient(#e5484d,#f0a020,#22c9a0,#4f7cff,#a855f7,#e5484d)" : `linear-gradient(135deg,${bg} 55%,${fg} 55%)`}"></span>${n}</button>`).join("")}</div>
     ${cur === "chameleon" ? `<button class="item" data-reroll>${ic("palette")} New colors</button>` : ""}
     <button class="item" data-present>${ic("monitor")} Presentation mode</button>
-    ${S.store && S.user ? `<h4>Work</h4><button class="item" data-train>${ic("book")} Trainings</button>
+    ${S.store && S.user ? `<h4>Work</h4><button class="item" data-train>${ic("book")} Trainings</button><button class="item" data-vlim>${ic("vitals")} Vital alerts</button>
       <button class="item" data-rules>${ic("shield")} ${isSup() ? "Supervisor tools" : "Team rules"}</button>` : ""}
     ${feedbackOn() ? `<button class="item" data-flag>${ic("feedback")} Give feedback</button>${seesFeedback() ? `<button class="item" data-hub>${ic("flag")} Feedback list</button>` : ""}` : ""}
     ${S.store ? `<h4>${S.user ? esc(S.user.name) + (S.site ? " · " + S.site : "") : "Team"}</h4>
@@ -340,6 +374,7 @@ function toggleTray() {
   $("[data-flag]", t)?.addEventListener("click", () => { close(); raiseFlag(); });
   $("[data-hub]", t)?.addEventListener("click", () => { close(); location.hash = "flags"; });
   $("[data-train]", t)?.addEventListener("click", () => { close(); location.hash = "training"; });
+  $("[data-vlim]", t)?.addEventListener("click", () => { close(); vitalLimitsModal(); });
   $("[data-rules]", t)?.addEventListener("click", () => { close(); location.hash = "rules"; });
   $("[data-site]", t)?.addEventListener("click", () => { close(); leaveGuard(() => { setSite(null); S.user = null; try { sessionStorage.removeItem("rn-user"); } catch {} route(); }); });
   $("[data-pin]", t)?.addEventListener("click", () => { close(); newPinModal(users().find(u => u.id === S.user.id), "Change my PIN"); });
@@ -405,7 +440,7 @@ window.addEventListener("hashchange", () => {
   open.forEach(x => x.close(true));
   if (S.snap?.dirty && !S.formDirty) { const pt = findPt(S.snap.id); S.snap = null; S.open = null; if (pt) { saveNow(pt); toast(`${pt.name}: saved in the background`, 1600); } }
   if (isDirty()) { const want = location.hash; history.replaceState(null, "", lastHash || "#home"); leaveGuard(() => { lastHash = want; location.hash = want; }); return; }
-  lastHash = location.hash; S.open = null; route();
+  lastHash = location.hash; S.open = null; S.visit = (S.visit || 0) + 1; route();
 });
 window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
 const goBack = () => { const h = location.hash.slice(1); location.hash = h.startsWith("pt-") ? "unit-" + (findPt(h.slice(3))?.unit || "") : h.startsWith("hp-") && h !== "hp-new" ? "pt-" + h.slice(3) : "home"; };
@@ -505,10 +540,54 @@ function countModal() {
 }
 async function boardSave(fn) { S.board = await S.store.getShared("board.json", []); fn(S.board); await S.store.setShared("board.json", S.board); }
 function boardModal() {
-  const m = modal(`${ic("pin")} Pinned note`, `<div class="f"><textarea id="bT" rows="5" placeholder="What happened, what to watch, what's still pending…"></textarea></div><p class="muted">Stays on Home for everyone until someone marks it resolved.</p>`,
+  const links = new Map();
+  const m = modal(`${ic("pin")} Pinned note`, `<div class="f"><textarea id="bT" rows="5" placeholder="What happened, what to watch, what's still pending… Type a patient's name (or @) to link them."></textarea><div class="msug" id="bSug"></div></div>
+    <label class="tgl" style="padding:2px 0 8px"><input type="checkbox" id="bPop"><span class="sw"></span><span>Show big every time<small>Linked patients' notes open with this on top until you press OK</small></span></label>
+    <p class="muted">Stays on Home for everyone, and on each linked patient's note, until someone marks it resolved.</p>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="bGo">Save note</button>`);
+  mentionBox($("#bT", m), $("#bSug", m), links);
   setTimeout(() => $("#bT", m)?.focus(), 50);
-  $("#bGo", m).onclick = async () => { const t = $("#bT", m).value.trim(); if (!t) return; await boardSave(b => b.push({ id: uid(), text: t, by: S.user?.name, date: S.today, at: Date.now() })); m.close(true); home(); };
+  $("#bGo", m).onclick = async () => { const t = $("#bT", m).value.trim(); if (!t) return;
+    const ids = [...links.keys()].filter(id => t.includes("@" + links.get(id)));
+    await boardSave(b => b.push({ id: uid(), text: t, by: S.user?.name, date: S.today, at: Date.now(), links: ids, popup: $("#bPop", m).checked }));
+    m.close(true); route(); };
+}
+// Name suggestions while typing: "@" or the start of a patient's name. Picking one writes "@Last, First" and links the note to them.
+function mentionBox(ta, box, links) {
+  const frag = () => { const before = ta.value.slice(0, ta.selectionStart);
+    const m = before.match(/@([A-Za-z][A-Za-z' -]*,?\s*[A-Za-z'-]*)$/) || before.match(/(?:^|[\s(])([A-Za-z][A-Za-z'-]{2,}(?:,\s*[A-Za-z'-]*)?)$/);
+    return m ? { q: m[1].trim().toLowerCase(), at: before.length - m[0].replace(/^[\s(]/, "").length, at2: before.length, mention: m[0].includes("@") } : null; };
+  const show = () => {
+    const f = frag(); if (!f || (!f.mention && f.q.length < 3)) { box.innerHTML = ""; return; }
+    const hits = S.pts.filter(p => active(p) && !links.has(p.id) && (() => { const n = p.name.toLowerCase(), [last, first = ""] = n.split(/,\s*/);
+      return n.startsWith(f.q) || `${first} ${last}`.startsWith(f.q) || (f.mention && first.startsWith(f.q)); })()).slice(0, 4);
+    box.innerHTML = hits.map(p => `<button type="button" class="mchip" data-id="${p.id}">${ic("user", 12)} Link <b>${esc(p.name)}</b> <small>${p.unit}</small></button>`).join("");
+    $$(".mchip", box).forEach(c => c.onmousedown = e => { e.preventDefault(); const p = findPt(c.dataset.id), f2 = frag(); if (!f2) return;
+      ta.value = ta.value.slice(0, f2.at) + "@" + p.name + " " + ta.value.slice(f2.at2); links.set(p.id, p.name);
+      const pos = f2.at + p.name.length + 2; ta.setSelectionRange(pos, pos); ta.focus(); box.innerHTML = ""; ta.dispatchEvent(new Event("input", { bubbles: true })); });
+  };
+  ta.addEventListener("input", show); ta.addEventListener("click", show); ta.addEventListener("blur", () => setTimeout(() => box.innerHTML = "", 150));
+}
+// "@Last, First" becomes a blue link to that patient's note.
+function withLinks(text, ids = []) {
+  let h = esc(text).replace(/\n/g, "<br>");
+  for (const id of ids) { const p = findPt(id); if (!p) continue; h = h.split(esc("@" + p.name)).join(`<a class="plink" href="#pt-${p.id}">${esc(p.name)}</a>`); }
+  return h;
+}
+const boardFor = pt => (S.board || []).filter(n => (n.links || []).includes(pt.id));
+async function resolveBoard(id) { await boardSave(list => { const i = list.findIndex(x => x.id === id); if (i >= 0) list.splice(i, 1); }); route(); }
+// Notes marked "show big every time": shown over the note once per visit, until OK.
+function popupNotes(pt) {
+  if (S.viewDate) return;
+  const due = [...(pt.notes || []).filter(n => n.popup && !(n.kind === "quick" && n.done)).map(n => ({ n, from: n.kind === "keep" ? "Keep in mind" : "To write up" })),
+    ...boardFor(pt).filter(n => n.popup).map(n => ({ n, from: "Pinned note" }))].filter(({ n }) => !(S.popSeen ||= new Set()).has(`${S.visit || 0}:${pt.id}:${n.id}`));
+  if (!due.length || $(".popnote")) return;
+  const { n, from } = due[0];
+  const s2 = document.createElement("div"); s2.className = "scrim popnote";
+  s2.innerHTML = `<div class="popcard"><div class="pophead">${ic("note", 18)} ${from}<span class="sp"></span><span class="muted small">${esc(n.by || "")} · ${md(n.date)}</span></div>
+    <div class="popbody">${withLinks(n.text, n.links)}</div><div class="row"><span class="sp"></span><button class="btn p" id="popOk">OK</button></div></div>`;
+  document.body.append(s2); setTimeout(() => $("#popOk", s2)?.focus(), 60);
+  $("#popOk", s2).onclick = () => { S.popSeen.add(`${S.visit || 0}:${pt.id}:${n.id}`); s2.classList.add("out"); setTimeout(() => { s2.remove(); popupNotes(pt); }, 220); };
 }
 // ---- announcements: resolved per person, not for everyone
 const myAud = () => S.store?.demo ? ["scribes", "providers", "everyone"] : S.user?.role === "provider" ? ["providers", "everyone"] : ["scribes", "everyone"];
@@ -669,7 +748,7 @@ function home() {
     </div>
     <div class="railsec" data-help="pinned">
       <div class="row rh">${ic("pin")}<b>Pinned Notes</b><span class="sp"></span><button class="btn sm" id="bAdd">${ic("plus", 13)} Note</button></div>
-      ${(S.board || []).slice().reverse().map((n, i) => `<div class="sticky board c${i % 3}"><div>${esc(n.text).replace(/\n/g, "<br>")}</div>
+      ${(S.board || []).slice().reverse().map((n, i) => `<div class="sticky board c${i % 3}"><div>${n.popup ? `<span class="popbadge" title="Shows big on linked notes">${ic("pin", 11)}</span>` : ""}${withLinks(n.text, n.links)}</div>
         <div class="sh" style="margin:6px 0 0"><span class="muted">${esc(n.by || "")} · ${md(n.date)}</span><span class="sp"></span><button class="btn sm" data-bd="${n.id}">${ic("check", 12)} Resolved</button></div></div>`).join("") || `<p class="muted small">Nothing pinned.</p>`}
     </div>
   </aside></div>`;
@@ -699,7 +778,7 @@ function autoA3(p, live) {
   const names = live.map(q => q.name).join(" ") + " " + (p.psych?.dx || "");
   if (/overdose|\bOD\b/i.test(names)) return "OD";
   if (/suicide attempt|schizophrenia/i.test(names)) return "P";
-  if (loud(flagsFor(p)).some(f => f.level === "red")) return "M";
+  if (loud(flagsFor(p)).some(f => f.level === "red" && !/was it ordered\?$/.test(f.text))) return "M";
   return "~";
 }
 
@@ -1027,8 +1106,10 @@ async function setRule(name, rule) {
 function stickyPanel(pt) {
   const ns = pt.notes || [], quick = ns.filter(n => n.kind === "quick" && !n.done), keep = ns.filter(n => n.kind === "keep");
   if (S.viewDate) return "";
-  if (!quick.length && !keep.length) return "";
-  return `<div class="stickies">${[...quick, ...keep].map(n => `<div class="sticky ${n.kind}"><div class="sh"><b>${n.kind === "quick" ? "To write up" : "Keep in mind"}</b><span class="muted">${md(n.date)}</span><span class="sp"></span>
+  const board = boardFor(pt);
+  if (!quick.length && !keep.length && !board.length) return "";
+  return `<div class="stickies">${board.map(n => `<div class="sticky board c1"><div class="sh"><b>${ic("pin", 12)} Pinned note</b><span class="muted">${esc(n.by || "")} · ${md(n.date)}</span><span class="sp"></span>
+      <button class="btn sm" data-bres="${n.id}" title="Resolves it everywhere">${ic("check", 12)} Resolved</button></div><div>${withLinks(n.text, n.links)}</div></div>`).join("")}${[...quick, ...keep].map(n => `<div class="sticky ${n.kind}"><div class="sh"><b>${n.kind === "quick" ? "To write up" : "Keep in mind"}</b>${n.popup ? `<span class="popbadge" title="Shows big every time">${ic("pin", 11)}</span>` : ""}<span class="muted">${md(n.date)}</span><span class="sp"></span>
       ${n.kind === "quick" ? `<button class="btn sm" data-sdone="${n.id}" title="I wrote this into the note">${ic("check", 12)} Written up</button>` : ""}<button class="btn sm" data-sdel="${n.id}" title="Delete">${ic("x", 12)}</button></div><div>${esc(n.text).replace(/\n/g, "<br>")}</div></div>`).join("")}
     </div>`;
 }
@@ -1036,7 +1117,8 @@ function stickyModal(pts, preselect) {
   const m = modal(`${ic("note")} Make a Note`, `${pts.length > 1 ? `<div class="f"><span>Patient</span><select id="sP">${pts.map(p => `<option value="${p.id}" ${p.id === preselect ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>` : ""}
     <div class="row" style="margin-bottom:8px"><span class="chip on" data-k="quick">Quick note (write up later)</span><span class="chip" data-k="keep">Keep with patient</span></div>
     <div class="f"><textarea id="sT" rows="4" placeholder="e.g. HA, start Tylenol 650 Q6H PRN"></textarea></div>
-    <p class="muted" id="sHelp">Shows on the patient until you mark it written up.</p>`,
+    <p class="muted" id="sHelp">Shows on the patient until you mark it written up.</p>
+    <label class="tgl" style="padding:8px 0 0"><input type="checkbox" id="sPop"><span class="sw"></span><span>Show big every time<small>Anyone opening this note sees it on top first, until they press OK</small></span></label>`,
     `<button class="btn" data-x>Cancel</button><button class="btn p" id="sGo">Save note</button>`);
   let kind = "quick"; setTimeout(() => $("#sT", m)?.focus(), 50);
   $$("[data-k]", m).forEach(c => c.onclick = () => { kind = c.dataset.k; $$("[data-k]", m).forEach(x => x.classList.toggle("on", x === c));
@@ -1044,11 +1126,13 @@ function stickyModal(pts, preselect) {
   $("#sGo", m).onclick = async () => {
     const text = $("#sT", m).value.trim(); if (!text) return;
     const pt = pts.length > 1 ? findPt($("#sP", m).value) : pts[0];
-    (pt.notes ||= []).push({ id: uid(), kind, text, date: S.today, by: S.user?.name }); m.close(true);
+    (pt.notes ||= []).push({ id: uid(), kind, text, date: S.today, by: S.user?.name, ...($("#sPop", m).checked ? { popup: true } : {}) }); m.close(true);
     await saveNow(pt, { docx: false, why: kind === "quick" ? "Added quick note" : "Added sticky note" }); toast("Note saved"); route();
   };
 }
 function wireSticky(pt) {
+  $$("[data-bres]").forEach(b => b.onclick = () => resolveBoard(b.dataset.bres));
+  setTimeout(() => popupNotes(pt), 120);
   $("#addSticky")?.addEventListener("click", () => stickyModal([pt]));
   $$("[data-sdone]").forEach(b => b.onclick = async () => { pt.notes.find(n => n.id === b.dataset.sdone).done = S.today; await saveNow(pt, { docx: false }); route(); });
   $$("[data-sdel]").forEach(b => b.onclick = async () => { if (await ask("Delete this note?", "It will be gone for everyone.", "Delete")) { pt.notes = pt.notes.filter(n => n.id !== b.dataset.sdel); await saveNow(pt, { docx: false }); route(); } });

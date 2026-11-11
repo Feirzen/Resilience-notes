@@ -643,3 +643,21 @@ body.presenting .pzgo{display:none}
 @keyframes pulse{50%{opacity:.35}}
 .oclear{margin-left:auto;border:0;background:transparent;color:var(--chromeDim);font-size:11.5px;padding:4px 8px;border-radius:6px}
 .oclear:hover{color:var(--chromeText)}
+.vlim{display:grid;grid-template-columns:repeat(3,1fr);gap:4px 12px}
+.vlim small{font-size:11px}
+/* ---------- patient links + show-every-time notes ---------- */
+.msug{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;min-height:0}
+.mchip{display:inline-flex;align-items:center;gap:5px;border:1px solid #9cbcf2;background:#eef4ff;color:#2a62c9;border-radius:9px;padding:4px 10px;font-size:12.5px;animation:in .2s ease-out}
+.mchip small{opacity:.7;font-size:10.5px}
+[data-theme=dark] .mchip{background:#1d2b48;border-color:#36507f;color:#9cbcf2}
+.plink{color:#2a62c9;font-weight:600;text-decoration:none;border-bottom:1px solid currentColor}
+.plink:hover{opacity:.8}
+[data-theme=dark] .plink{color:#9cbcf2}
+.popbadge{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:5px;background:var(--hl);color:var(--ambInk);margin:0 6px;vertical-align:-3px}
+.popnote{display:grid;place-items:center;backdrop-filter:blur(3px);animation:fadeIn .2s ease}
+.popnote.out{opacity:0;transition:opacity .2s}
+.popcard{width:min(560px,92vw);background:#fff6c4;color:#3d3200;border-radius:16px;padding:20px 22px;box-shadow:0 24px 60px rgba(0,0,0,.35);animation:popIn .32s cubic-bezier(.2,.9,.3,1.2)}
+.pophead{display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px;margin-bottom:10px}
+.popbody{font-family:var(--serif);font-size:20px;line-height:1.45;margin-bottom:16px}
+@keyframes popIn{from{opacity:0;transform:scale(.92) translateY(10px)}to{opacity:1;transform:none}}
+@keyframes fadeIn{from{opacity:0}}
