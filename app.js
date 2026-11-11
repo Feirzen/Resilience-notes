@@ -4,6 +4,7 @@ import { UNITS, PROVIDERS, PE_LINES, TAPERS, blocksFor, progressBlocks } from ".
 import { toDocx } from "./lib/docx-out.js";
 import { readDocx } from "./lib/docx-in.js";
 import { toPdf } from "./lib/pdf-out.js";
+import { boardPdf, STATUS as BSTAT } from "./lib/board-pdf.js";
 import { Store, supported } from "./lib/store.js";
 import { demoPatients } from "./lib/demo.js";
 import { MED_NAMES, findMed } from "./lib/meds.js";
@@ -298,10 +299,10 @@ function shell() {
       ${S.store && S.user ? `<button class="gear" id="helpB" aria-label="Help" title="Help">${ic("help", 18)}</button>` : ""}
       <button class="gear" id="gear" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
     </div>
-    ${S.store ? `<nav class="tabs"><a href="#home" class="${!curUnit && !hash.startsWith("pt-") ? "on" : ""}">HOME</a>${UNITS.map(u => {
+    ${S.store ? `<nav class="tabs"><a href="#home" class="${!curUnit && !hash.startsWith("pt-") && hash !== "board" ? "on" : ""}">HOME</a>${UNITS.map(u => {
       const red = counts[u].some(p => flagsFor(p).some(f => f.level === "red"));
       return `<a href="#unit-${u}" class="${curUnit === u ? "on" : ""}">${u.toUpperCase()}<i>${counts[u].length}</i>${red ? `<span class="rd"></span>` : ""}</a>`;
-    }).join("")}</nav>${tabStrip(hash)}` : ""}`;
+    }).join("")}<a href="#board" class="bbtab ${hash === "board" ? "on" : ""}">${ic("grid", 13)} BEDBOARD</a></nav>${tabStrip(hash)}` : ""}`;
   wireTabs(); setTopH();
   if ($("#oldNotes")) $("#oldNotes").onclick = () => S.viewDate ? (S.viewDate = null, route()) : oldNotesModal();
   $("#gear").onclick = toggleTray;
@@ -412,6 +413,7 @@ function route() {
   if (h.startsWith("hp-")) return hpForm(h.slice(3));
   if (h === "flags") return seesFeedback() ? flagHub() : home();
   if (h === "training") return trainingPage();
+  if (h === "board") return bedboard();
   if (h === "rules") return rulesPage();
   return home();
 }
@@ -1807,6 +1809,68 @@ function hpForm(id) {
     toast(ready ? `${rec.name}: H&P ready to see` : `${rec.name}: saved, still pending`); location.hash = "pt-" + rec.id;
   });
   $("#hSave").onclick = saveHp(false); $("#hReady").onclick = saveHp(true);
+}
+
+// ---------------- bedboard ----------------
+// Every unit as a square, every patient colored by status. Seen and billing can be ticked right here.
+// Each person keeps their own view settings (palette button); Print makes a one-page fold-up sheet.
+const UCOL = { TIMP: [20, 150, 140], Arches: [214, 110, 40], Nebo: [52, 102, 200], Zion: [124, 82, 196], Canyons: [176, 72, 72], Bryce: [46, 140, 70] };
+const ucol = u => UCOL[u] || [90, 100, 120];
+const BOARD_DEF = { seen: true, bill: true, text: "flag", color: "status", hideOk: false };
+const boardPrefs = () => ({ ...BOARD_DEF, ...(S.settings?.boardPrefs?.[S.user?.id || "me"] || {}) });
+async function saveMine(key, val) {
+  const me = S.user?.id || "me";
+  S.settings = { ...S.settings, [key]: { ...(S.settings?.[key] || {}), [me]: val } };
+  if (!S.store) return;
+  try { const fresh = await S.store.getShared("settings.json", {}); fresh[key] = { ...(fresh[key] || {}), [me]: val }; await S.store.setShared("settings.json", fresh); } catch (e) { console.warn(e); }
+}
+function bStatus(p) {
+  if (p.status === "admit") return "admit";
+  const f = loud(flagsFor(p)); return f.some(x => x.level === "red") ? "attn" : f.length ? "fu" : "ok";
+}
+function bText(p, mode) {
+  if (mode === "none") return "";
+  if (mode === "dx") return p.problems.filter(q => !(q.resolved && q.resolved < S.today)).map(q => tAbbr(q.name)).join(", ");
+  const f = loud(flagsFor(p)); const top = f.find(x => x.level === "red") || f[0];
+  return p.status === "admit" ? (hpReady(p) ? "H&P ready" : "H&P needs prep") : top ? top.text + (f.length > 1 ? ` +${f.length - 1}` : "") : "";
+}
+function bedboard() {
+  const P = boardPrefs(), rgb = c => `rgb(${c.join(",")})`;
+  const seenN = S.pts.filter(p => active(p) && p.seen?.[S.today]).length, total = S.pts.filter(active).length;
+  $("#main").innerHTML = `<div class="row" style="margin-bottom:12px"><h1>Bedboard</h1><span class="muted">${total} patients${P.seen ? ` · <b id="bbSeenN">${seenN}</b> seen` : ""}</span><span class="sp"></span>
+      <div class="blegend">${Object.entries(BSTAT).map(([k, v]) => `<span><i style="background:${rgb(v.color)}"></i>${v.label}</span>`).join("")}</div>
+      <button class="btn ic" id="bbSet" title="View settings">${ic("palette")}</button><button class="btn" id="bbPrint">${ic("print")} Print</button></div>
+    <div class="bboard ${P.color === "unit" ? "byunit" : ""}">${UNITS.map(u => { const l = unitPts(u).filter(p => !P.hideOk || bStatus(p) !== "ok");
+      return `<section class="bbu" style="--uc:${rgb(ucol(u))}"><header><a href="#unit-${u}">${u.toUpperCase()}</a><span>${unitPts(u).length}</span></header>
+        ${l.map(p => { const st = bStatus(p), t = bText(p, P.text);
+          return `<div class="bbr ${p.seen?.[S.today] ? "seen" : ""}" data-pt="${p.id}" style="--sc:${rgb(BSTAT[st].color)}"><i class="bdot" title="${BSTAT[st].label}"></i>
+            <a class="bbn" href="#pt-${p.id}"><b>${esc(p.name)}</b>${t ? `<small>${esc(t)}</small>` : ""}</a>
+            ${P.bill ? `<input class="cell bbill" value="${esc(p.bill?.[S.today] ?? "")}" placeholder="${tset().today.default3 && always3(p) ? "3" : "–"}" maxlength="1" inputmode="numeric" title="Billing today">` : ""}
+            ${P.seen ? `<label class="bseen" title="Seen today"><input type="checkbox" ${p.seen?.[S.today] ? "checked" : ""}><span>${ic("check", 12)}</span></label>` : ""}</div>`; }).join("") || `<p class="muted small" style="padding:8px 10px">${P.hideOk && unitPts(u).length ? "Nothing to flag" : "No patients"}</p>`}</section>`; }).join("")}</div>`;
+  $$(".bbr").forEach(r => { const pt = findPt(r.dataset.pt);
+    $(".bbill", r)?.addEventListener("change", e => { const v = e.target.value.trim(); pt.bill ||= {}; if (v) pt.bill[S.today] = v; else delete pt.bill[S.today]; saveNow(pt, { docx: false, why: `Billing ${v || "cleared"}` }); });
+    $(".bseen input", r)?.addEventListener("change", e => { pt.seen ||= {}; if (e.target.checked) pt.seen[S.today] = S.user?.name || true; else delete pt.seen[S.today]; r.classList.toggle("seen", e.target.checked); if ($("#bbSeenN")) $("#bbSeenN").textContent = S.pts.filter(p => active(p) && p.seen?.[S.today]).length; saveNow(pt, { docx: false, why: e.target.checked ? "Marked seen" : "Unmarked seen" }); });
+  });
+  $("#bbPrint").onclick = () => {
+    const units = UNITS.map(u => ({ name: u, color: ucol(u), rows: unitPts(u).map(p => ({ name: p.name, status: bStatus(p), text: bText(p, P.text), bill: P.bill ? (p.bill?.[S.today] || "") : "" })) })).filter(u => u.rows.length);
+    const doc = boardPdf(window.jspdf.jsPDF, units, { title: `Bedboard · ${new Date(S.today + "T12:00").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}`, showBill: P.bill, showSeen: P.seen, showText: P.text !== "none" });
+    const url = URL.createObjectURL(doc.output("blob")), f = document.createElement("iframe");
+    f.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0"; f.src = url; document.body.append(f);
+    f.onload = () => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch { window.open(url); } setTimeout(() => f.remove(), 60000); };
+  };
+  $("#bbSet").onclick = () => {
+    const opt = (k, v, label) => `<button class="chip ${P[k] === v ? "on" : ""}" data-k="${k}" data-v="${v}">${label}</button>`;
+    const tog = (k, label, sub) => `<label class="tgl" style="padding:4px 0"><input type="checkbox" data-t="${k}" ${P[k] ? "checked" : ""}><span class="sw"></span><span>${label}<small>${sub}</small></span></label>`;
+    const m = modal(`${ic("palette")} Bedboard view`, `<div data-nodirty><p class="muted" style="margin-bottom:10px">Just for you. Saved on every computer you sign in to.</p>
+      <div class="lbl" style="margin-top:0">Under each name</div><div class="row">${opt("text", "flag", "Top flag")}${opt("text", "dx", "Diagnoses")}${opt("text", "none", "Nothing")}</div>
+      <div class="lbl">Colors</div><div class="row">${opt("color", "status", "By status")}${opt("color", "unit", "By unit")}</div>
+      <div class="lbl">Show</div>${tog("seen", "Seen today", "A check box per patient")}${tog("bill", "Billing", "Type 1, 2 or 3 right on the board")}${tog("hideOk", "Only patients with something going on", "Hides 'Nothing abnormal'")}</div>`,
+      `<button class="btn" id="bbDef">Back to defaults</button><span class="sp"></span><button class="btn p" data-x>Done</button>`);
+    const apply = async patch => { Object.assign(P, patch); await saveMine("boardPrefs", { ...P }); bedboard(); };
+    $$("[data-k]", m).forEach(b => b.onclick = () => { $$(`[data-k="${b.dataset.k}"]`, m).forEach(x => x.classList.toggle("on", x === b)); apply({ [b.dataset.k]: b.dataset.v }); });
+    $$("[data-t]", m).forEach(c => c.onchange = () => apply({ [c.dataset.t]: c.checked }));
+    $("#bbDef", m).onclick = async () => { await saveMine("boardPrefs", { ...BOARD_DEF }); m.close(true); bedboard(); };
+  };
 }
 
 // ---------------- flags (this project's own hub, saved in the team folder) ----------------

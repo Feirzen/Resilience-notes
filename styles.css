@@ -661,3 +661,29 @@ body.presenting .pzgo{display:none}
 .popbody{font-family:var(--serif);font-size:20px;line-height:1.45;margin-bottom:16px}
 @keyframes popIn{from{opacity:0;transform:scale(.92) translateY(10px)}to{opacity:1;transform:none}}
 @keyframes fadeIn{from{opacity:0}}
+/* ---------- bedboard ---------- */
+.tabs a.bbtab{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
+.blegend{display:flex;gap:12px;font-size:12px;color:var(--dim);flex-wrap:wrap}
+.blegend span{display:inline-flex;align-items:center;gap:5px}
+.blegend i{width:9px;height:9px;border-radius:50%}
+.bboard{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;align-items:start}
+.bbu{background:var(--paper);border:1px solid var(--paperLine);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);animation:in .35s ease-out both}
+.bbu:nth-child(2){animation-delay:.04s}.bbu:nth-child(3){animation-delay:.08s}.bbu:nth-child(4){animation-delay:.12s}.bbu:nth-child(5){animation-delay:.16s}.bbu:nth-child(6){animation-delay:.2s}
+.bbu header{display:flex;align-items:center;justify-content:space-between;background:var(--uc);color:#fff;padding:8px 12px;font-weight:700;letter-spacing:.06em;font-size:13px}
+.bbu header a{color:inherit;text-decoration:none}
+.bbu header span{font-weight:600;opacity:.85}
+.bbr{display:flex;align-items:center;gap:8px;padding:6px 10px 6px 12px;border-bottom:1px solid var(--paperLine);transition:background .2s}
+.bbr:last-child{border-bottom:0}
+.bbr:hover{background:var(--hover)}
+.bdot{width:10px;height:10px;border-radius:50%;background:var(--sc);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--sc) 18%,transparent)}
+.byunit .bbr{border-left:4px solid var(--uc)}
+.byunit .bdot{background:var(--uc);box-shadow:none}
+.bbn{flex:1;min-width:0;text-decoration:none;color:var(--ink);display:grid}
+.bbn b{font-family:var(--serif);font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bbn small{font-size:11.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bbill{width:34px!important;text-align:center;font-weight:700}
+.bseen{position:relative;cursor:pointer}
+.bseen input{position:absolute;opacity:0}
+.bseen span{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;border:1.5px solid var(--paperLine);color:transparent;transition:all .2s}
+.bseen input:checked+span{background:var(--accent);border-color:var(--accent);color:#fff}
+.bbr.seen .bbn b{opacity:.55}
