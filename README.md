@@ -35,7 +35,7 @@ See `NOTICE.md`: the note templates, the provider sheet layout, and unit/site na
 - **Holidays**: lib/holidays.js. Toggle in Settings > Look.
 
 ## Presentation mode
-The monitor icon on the first screen (or Settings > Presentation mode) runs slides plus live guided tours on fake patients. Keys: → or Space next, ← back, Esc twice to exit. The first time it runs, `sw.js` saves an offline copy of the app's own files so it still loads on bad Wi-Fi. `lib/present.js` holds the deck.
+The monitor icon on the first screen (or Settings > Presentation mode) runs a quick guided tour of the demo on fake patients: short labels only, you do the talking. → or Space next, ← back. The dock has Skip (jump past a part), the part name (click it to jump anywhere), and Pause. Esc or Pause leaves a "Resume tour" pill in the corner so you can use the app and pick back up where you were. Clicking anywhere in the app mid-tour lets you explore; → continues the tour from that spot. The first time it runs, `sw.js` saves an offline copy of the app's own files so it still loads on bad Wi-Fi. `lib/present.js` holds the tour.
 
 ## Layout
 - `app.js`, `styles.css`, `index.html`: the screens (home dashboard, unit list, paper-style note editor, vitals, prep review, print check, H&P form, flag list).
